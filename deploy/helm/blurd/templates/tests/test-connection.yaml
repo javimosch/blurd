@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "blurd.fullname" . }}-test
+  labels:
+    {{- include "blurd.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: check
+      image: {{ include "blurd.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["python3", "-c"]
+      args:
+        # Asserts the service is not merely reachable but actually wired to the
+        # backends this release configured -- a pod that answers "healthy" while
+        # pointing at the wrong store is the failure this catches.
+        - |
+          import json, sys, urllib.request
+          url = "http://{{ include "blurd.fullname" . }}:{{ .Values.service.port }}/v1/health"
+          d = json.loads(urllib.request.urlopen(url, timeout=30).read())
+          print(json.dumps(d))
+          assert d.get("ok") is True, "health is not ok"
+          assert d.get("status") == "healthy", d.get("status")
+          assert d.get("database") == "{{ .Values.db.backend }}", \
+              f"expected db {{ .Values.db.backend }}, got {d.get('database')}"
+          assert d.get("storage") == "{{ .Values.storage.backend }}", \
+              f"expected storage {{ .Values.storage.backend }}, got {d.get('storage')}"
+          print("ok: healthy on the configured backends")

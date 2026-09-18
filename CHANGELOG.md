@@ -1,0 +1,176 @@
+# Changelog
+
+blurd was developed privately and is published here from 0.16.0. This is the
+condensed history — it keeps the decisions and the measurements, because several
+of them are the reason the code looks the way it does.
+
+## 0.17.0
+
+**Portable API keys, and the CLI conformance specs end to end.**
+
+Keys were only ever minted per instance, which meant a second deployment could
+not reuse the `blk_` credentials already baked into running apps. `key_sha` is
+portable even though plaintext is not, so `keys export` now dumps
+`{id, name, prefix, key_sha, scope}` for active keys — never plaintext, never
+revoked, `last_used` stays local — and `keys import` re-homes them
+idempotently: existing hashes skip, `id` collisions remap, revoked keys do not
+resurrect. `keys add --key` covers the one-off case where the plaintext is
+still known. Import works across backends (SQLite → Mongo verified) and over
+`kubectl exec` without a shell.
+
+The CLI now passes `cli-spec-conformance` 28/28 (was 8/26). `help-json` is a
+command alongside `--help-json`; argparse errors became typed `invalid_argument`
+bodies exiting 85 instead of exit-2 usage text; `guide` JSON follows the
+agent-skill schema; `daemon start|stop|status` is a command group with
+idempotent start and no-op stop; `/_health` and `/_shutdown` (loopback-only)
+join `/v1/health`. Two deliberate deviations: `/_shutdown` is loopback-only
+rather than token-gated — strictly tighter — and `help-json`/`guide` emit
+their documents at top level, outside the `data` envelope.
+
+`blurd feedback "<msg>"` dual-writes a submission to `POST /v1/feedback` and a
+central relay under one client-generated `id`, never fails the caller, and
+works without an API key. The endpoint is open for intake (16 KB, 30/min/IP);
+reads require an operator key.
+
+Verified: conformance 126/126 on SQLite, Postgres and MongoDB; seam, schema
+drift and Helm guardrails clean; key export/import verified between isolated
+homes and cross-backend; feedback relay smoke-tested live.
+
+## 0.16.0
+
+**A Helm chart, a non-root image, and a stale-artifact bug.**
+
+Proving the deployment paths rather than asserting them turned up two defects,
+both only reachable through a real container.
+
+A `done` job could report `result: null` for an image that was still there:
+`?force=1` deletes the artifact for a `(sha, profile_hash)` and inserts a new
+one, leaving earlier jobs pointing at a row id that no longer exists. A job's
+output is identified by the **cache key**, not the row id, so the lookup now
+falls back to it. It hid because the conformance check sampled *one* job from an
+ordered set — it passed on 7 workers and failed on 3.
+
+The image ran as root with a root-owned home, while any sensible Kubernetes
+`securityContext` demands non-root. It now creates uid 65532 and chowns the home
+in the Dockerfile rather than relying on the pod's `fsGroup`, since not every CSI
+driver applies it.
+
+The chart is opinionated about what it will **not** render — sqlite with several
+replicas, unshared local blobs with several replicas, a grace period shorter
+than the drain, and above all a pod with no `resources.limits`.
+
+## 0.15.0
+
+**The queue is bounded by bytes, not job count.**
+
+Queued uploads are held in RAM by design — blurd never spools source bytes to
+disk. A job-count bound therefore promised nothing about memory: 1000 jobs ×
+~1.5 MB is ~1.5 GB on a box the sizing model budgeted at 750 MB, and the first
+symptom would have been an OOM kill.
+
+Overflow became proper backpressure: **HTTP 503 with `Retry-After`** (code 108).
+The previous code mapped to 502, which means "upstream returned garbage" — load
+balancers eject a backend on repeated 502s, the opposite of what a queue
+shedding load wants.
+
+## 0.14.0
+
+**MongoDB as a third metadata backend.**
+
+Not a schema port. A row-for-row translation would need `$lookup` on every
+listing, and a `$lookup` cannot use an index to satisfy the sort — keyset
+pagination over a million artifacts would degrade to a blocking in-memory sort,
+silently. So the artifact document carries its own copy of the image's
+dimensions and every tenant's labels.
+
+The seam built for the Postgres port paid off here: this was a new module beside
+`db_sql.py`, not a rewrite of it.
+
+Verified at 113/113 on all three backends, plus a new 77-check suite that runs
+two backends side by side and asserts they answer *identically*.
+
+## 0.13.0
+
+**The onnxruntime arena, not the copies, was the memory.**
+
+The obvious suspect was the pipeline's buffers. Redaction now writes in place,
+removing a ~32 MB copy per 10 MP image — and it produced **no measurable
+change**. `tracemalloc` accounts for only 45 MB of a job because numpy and cv2
+allocate outside Python's allocator.
+
+The cost was onnxruntime's CPU tensor arena, which retains freed tensors: right
+on a dedicated inference box, wrong on a small VM. Turning it off: 961 → 672 MB
+at 7 workers, with throughput differences landing on both sides across runs. The
+decisive test was a 512 MB container — arena on was OOM-killed at 3/30 images,
+arena off completed 30/30.
+
+## 0.12.0
+
+**Size to the machine, and hand memory back between jobs.**
+
+`workers` defaulted to `os.cpu_count() - 1`, which ignores memory and reports
+the *host's* cores inside a container. Sizing is now cgroup-aware.
+`malloc_trim()` between jobs returns freed pages to the OS — deliberately not
+the same as lowering glibc's global trim threshold, which was measured at −37%
+memory for −18% throughput because it trims inside the hot loop.
+
+## 0.11.0
+
+**Several replicas, safely.** Job ownership with heartbeats so a restart never
+seizes a live peer's work, an advisory lock around schema migration, the unique
+index arbitrating code binding, bounded HTTP threads, and graceful drain.
+
+## 0.10.0
+
+**The PostgreSQL backend.** Two portability bugs worth recording: a SQLite
+`REAL` is `DOUBLE PRECISION` in Postgres (8-byte vs 4-byte — getting it wrong
+breaks keyset pagination in a way that looks like a logic bug), and NULL
+ordering differs between engines, so sortable nullable columns need an
+expression rather than a bare column.
+
+## 0.9.0
+
+**`db.py` became the only module that executes SQL.** Forty statements were
+scattered across six modules, which made "pluggable metadata store" mean
+"pluggable for the call sites someone remembered". Enforced by
+`tests/seam_check.py`.
+
+## 0.8.0
+
+Scoped the distributed path, and made the compose setup honest about what it
+did and did not yet support.
+
+## 0.7.0
+
+**Optional S3 blob storage.** Blobs are ~95% of stored bytes, so this takes an
+instance's stateful footprint from ~360 GB per million images to ~19 GB. The S3
+client is ~130 lines of SigV4 over `urllib` rather than boto3, tested against a
+real MinIO.
+
+## 0.6.0
+
+**Measured capacity**, and fixed the two bugs the measurement exposed — notably
+that `cv2.FaceDetectorYN` is stateful and was being shared across threads, which
+failed 39 of 40 concurrent jobs while every single-image test passed.
+
+## 0.5.0
+
+**Made the admin UI survive scale.** Keyset pagination rather than OFFSET
+(which is both O(offset) and *wrong* under concurrent inserts), capped counts,
+and index-backed sorts only.
+
+## 0.4.0
+
+**Scoped API keys — a scope is a tenant, not a `WHERE` clause.** Tags, metadata
+and external ids carry a tenant, and an out-of-scope read returns 404 rather
+than 403.
+
+## 0.3.0
+
+API key management in the dashboard, split by blast radius: revocation is
+always available, creation is off by default behind a second secret.
+
+## 0.2.0
+
+Async jobs, unique codes as a primary key, and a sidecar standing in for the
+producer and consumer applications.

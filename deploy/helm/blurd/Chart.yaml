@@ -1,0 +1,17 @@
+apiVersion: v2
+name: blurd
+description: Face and licence-plate redaction service. Stores only the redacted image, never the original.
+type: application
+version: 0.2.1
+appVersion: "0.17.0"
+keywords: [redaction, blur, gdpr, anonymisation, images]
+home: https://github.com/javimosch/blurd
+sources:
+  - https://github.com/javimosch/blurd
+maintainers:
+  - name: javimosch
+    url: https://github.com/javimosch
+annotations:
+  # Deliberately not a StatefulSet: replicas are interchangeable. All state
+  # lives in the metadata store and object storage, both external to the pod.
+  category: ImageProcessing

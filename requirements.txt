@@ -1,0 +1,13 @@
+# Runtime dependencies. Everything else is the Python standard library
+# (http.server, sqlite3, argparse, urllib) -- on purpose, so the wire and disk
+# contracts stay free of framework-specific behaviour and remain portable to
+# the planned Go and machin implementations.
+opencv-python-headless>=4.9
+onnxruntime>=1.16
+numpy>=1.24
+
+# Optional: only the postgres metadata backend needs it. The sqlite profile
+# installs nothing extra. Unlike the S3 client (hand-rolled SigV4, ~130 lines),
+# the Postgres wire protocol is a real binary protocol with SCRAM auth and type
+# handling -- a driver is the right call there.
+# psycopg[binary]>=3.1

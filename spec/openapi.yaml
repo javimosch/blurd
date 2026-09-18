@@ -1,0 +1,363 @@
+openapi: 3.0.3
+info:
+  title: blurd
+  version: "0.12.0"
+  description: >
+    Machine-to-machine image redaction. Submit an image by URL or as raw bytes;
+    blurd detects faces and licence plates, redacts them, stores only the
+    redacted result, and links it to the sha256 of the source.
+    This document is the contract every blurd implementation must satisfy.
+servers:
+  - url: http://127.0.0.1:8770
+security:
+  - bearerAuth: []
+# A key may be SCOPED (see spec/scoped-keys.md). A scope restricts every read
+# and stamps every write, and it defines a tenant that namespaces unique codes
+# and owns labels. Out-of-scope reads return 404 rather than 403, so a scoped
+# caller cannot probe for what exists on the instance.
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  schemas:
+    Error:
+      type: object
+      properties:
+        ok: { type: boolean, enum: [false] }
+        error:
+          type: object
+          properties:
+            code: { type: integer, description: "Semantic exit code, mirrored by the CLI" }
+            type: { type: string }
+            message: { type: string }
+            details: { type: object }
+            recoverable: { type: boolean }
+            retry_after: { type: integer, nullable: true }
+            suggestions: { type: array, items: { type: string } }
+    Job:
+      type: object
+      description: >
+        What a producer gets back from POST /v1/images. Created immediately;
+        `result` is populated once status is "done".
+      properties:
+        job_id: { type: string, description: "job_<16 hex>" }
+        status: { type: string, enum: [queued, running, done, failed] }
+        external_id: { type: string, nullable: true, description: "the producer's own unique code" }
+        source_sha: { type: string, nullable: true, description: "known only once processed" }
+        profile_hash: { type: string }
+        source_kind: { type: string, enum: [url, stream, code-hit] }
+        cached: { type: boolean, description: "true when nothing was reprocessed" }
+        attempts: { type: integer }
+        created_at: { type: string }
+        started_at: { type: string, nullable: true }
+        finished_at: { type: string, nullable: true }
+        duration_ms: { type: number, nullable: true }
+        error: { type: object, nullable: true, description: "same shape as Error.error" }
+        result: { $ref: '#/components/schemas/Artifact' }
+        blob_url: { type: string }
+        blob_url_by_code: { type: string }
+    Artifact:
+      type: object
+      properties:
+        source_sha: { type: string, description: "sha256 of the source bytes" }
+        profile_hash: { type: string }
+        cached: { type: boolean, description: "true when nothing was reprocessed" }
+        needs_review: { type: boolean }
+        blob:
+          type: object
+          properties:
+            url: { type: string }
+            sha256: { type: string }
+            bytes: { type: integer }
+            mime: { type: string }
+        image:
+          type: object
+          properties:
+            width: { type: integer }
+            height: { type: integer }
+            mime: { type: string }
+            source_kind: { type: string, enum: [url, file, stream] }
+            source_ref: { type: string, nullable: true }
+        codes: { type: array, items: { type: string }, description: "external ids bound to this source, within the caller's tenant" }
+        codes_detail:
+          type: array
+          description: "unscoped callers only: which tenant owns each code"
+          items:
+            type: object
+            properties:
+              tenant: { type: string }
+              external_id: { type: string }
+        tags: { type: array, items: { type: string } }
+        metadata: { type: object, additionalProperties: { type: string } }
+        detections:
+          type: array
+          items:
+            type: object
+            properties:
+              cls: { type: string, enum: [face, plate] }
+              box: { type: array, items: { type: integer }, minItems: 4, maxItems: 4 }
+              score: { type: number }
+              detector: { type: string }
+        stats:
+          type: object
+          properties:
+            timings:
+              type: object
+              description: "Per-stage milliseconds: fetch, decode, detect_face, detect_plate, redact, encode, store, total"
+            detections: { type: object }
+            models: { type: object }
+            redact: { type: string }
+        created_at: { type: string }
+        errors: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+paths:
+  /v1/health:
+    get:
+      security: []
+      summary: Liveness. Unauthenticated.
+      responses: { "200": { description: healthy } }
+  /_health:
+    get:
+      security: []
+      summary: "Daemon liveness (cli-daemon-spec). Answers {ok, service, pid}."
+      responses: { "200": { description: healthy }, "503": { description: draining } }
+  /_shutdown:
+    post:
+      security: []
+      summary: "Stop the daemon (cli-daemon-spec). Loopback clients only."
+      responses: { "200": { description: "{stopping:true} then the process exits" }, "401": { description: "non-loopback caller" } }
+  /v1/feedback:
+    post:
+      security: []
+      summary: Submit feedback (cli-feedback-spec). Open intake.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                id: { type: string, description: "client-generated idempotency key" }
+                kind: { type: string, description: "bug | idea | praise | note" }
+                message: { type: string }
+                context: { type: string }
+                reporter: { type: string }
+                version: { type: string }
+      responses:
+        "200": { description: "{ok:true, id, stored:true}; a duplicate id is also a success" }
+        "400": { description: "missing/empty message, or invalid JSON" }
+        "413": { description: "body exceeds 16 KB" }
+        "429": { description: "rate limited (30/min per IP)" }
+    get:
+      summary: Read feedback, newest first. Operator keys only.
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200": { description: "{ok:true, feedback:[...]}" }
+        "401": { description: "Missing or invalid API key" }
+        "403": { description: "Scoped key: reading feedback is operator-only" }
+  /v1/images:
+    post:
+      summary: Submit an image for redaction (asynchronous)
+      description: >
+        Always creates a job and returns 202 immediately -- an HTTP request must
+        not have to stay open while an image is fetched and processed. Pass
+        ?wait=N to block for up to N seconds; if the job settles within that
+        window the response is 200 with `result` filled in.
+        If `external_id` is already known and on_conflict=reuse (the default),
+        the job is returned already "done" without any fetch or decode.
+      parameters:
+        - { in: query, name: code, schema: { type: string }, description: "external_id; raw-body form. Often the filename." }
+        - { in: query, name: wait, schema: { type: number }, description: "seconds to block, max 120. 0 = return at once." }
+        - { in: query, name: on_conflict, schema: { type: string, enum: [reuse, replace, reject], default: reuse } }
+        - { in: query, name: tags, schema: { type: string }, description: "comma separated (raw-body form)" }
+        - { in: query, name: metadata, schema: { type: string }, description: "JSON object (raw-body form)" }
+        - { in: query, name: profile, schema: { type: string }, description: "JSON profile overrides" }
+        - { in: query, name: force, schema: { type: string }, description: "1 to bypass the cache" }
+      requestBody:
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          application/octet-stream: { schema: { type: string, format: binary } }
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                external_id: { type: string }
+                on_conflict: { type: string, enum: [reuse, replace, reject] }
+                tags: { type: array, items: { type: string } }
+                metadata: { type: object }
+                profile: { type: object }
+      responses:
+        "202": { description: "Job accepted; Location header points at /v1/jobs/<id>", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        "200": { description: "Job already settled (cache hit, or ?wait covered it)", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        "401": { description: "Missing or invalid API key", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "422": { description: "Validation failed (bad image, non-public URL, too large)" }
+    get:
+      summary: List stored artifacts
+      parameters:
+        - { in: query, name: tag, schema: { type: array, items: { type: string } }, description: "repeatable; ANDed" }
+        - { in: query, name: "meta.<key>", schema: { type: string }, description: "exact metadata match" }
+        - { in: query, name: sha, schema: { type: string }, description: "sha256 prefix" }
+        - { in: query, name: code, schema: { type: string }, description: "external id; exact, or a trailing * for a prefix scan" }
+        - { in: query, name: needs_review, schema: { type: string } }
+        - { in: query, name: since, schema: { type: string } }
+        - { in: query, name: until, schema: { type: string } }
+        - { in: query, name: sort, schema: { type: string, enum: [created, faces, plates, size, review], default: created } }
+        - { in: query, name: direction, schema: { type: string, enum: [desc, asc], default: desc } }
+        - { in: query, name: cursor, schema: { type: string }, description: "next_cursor from the previous page; keyset pagination, O(1) at any depth" }
+        - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 }, description: "legacy; prefer cursor -- OFFSET is O(offset) and unstable under concurrent inserts" }
+      responses:
+        "200":
+          description: >
+            total, total_capped, count, items[], next_cursor, has_more, sort,
+            direction. `total` stops counting at 10000 (total_capped=true) and
+            is returned only when no cursor was supplied, because paging deeper
+            cannot change it.
+  /v1/images/{sha}:
+    get:
+      summary: Full record
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string } }
+        - { in: query, name: profile, schema: { type: string } }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
+        "404": { description: not found }
+    delete:
+      summary: Delete an image, its artifacts and its blobs
+      parameters: [{ in: path, name: sha, required: true, schema: { type: string } }]
+      responses: { "200": { description: deleted }, "404": { description: not found } }
+  /v1/blobs/{sha}:
+    get:
+      summary: Redacted image bytes
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string } }
+        - { in: query, name: profile, schema: { type: string } }
+      responses: { "200": { description: "image/jpeg or image/png" }, "404": { description: not found } }
+  /v1/thumbs/{sha}:
+    get:
+      summary: Thumbnail for grid views
+      parameters: [{ in: path, name: sha, required: true, schema: { type: string } }]
+      responses: { "200": { description: image/jpeg } }
+  /v1/jobs:
+    get:
+      summary: List jobs
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [queued, running, done, failed] } }
+        - { in: query, name: code, schema: { type: string } }
+        - { in: query, name: since, schema: { type: string } }
+        - { in: query, name: until, schema: { type: string } }
+        - { in: query, name: sort, schema: { type: string, enum: [created, duration, status], default: created } }
+        - { in: query, name: direction, schema: { type: string, enum: [desc, asc], default: desc } }
+        - { in: query, name: cursor, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: >
+            total, total_capped, count, items[], next_cursor, has_more, queue{}.
+            Items in a LISTING omit `result`; fetch a single job to get it.
+  /v1/jobs/{job_id}:
+    get:
+      summary: Job status, and its result once done
+      parameters:
+        - { in: path, name: job_id, required: true, schema: { type: string } }
+        - { in: query, name: wait, schema: { type: number }, description: "long-poll up to N seconds (max 120)" }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        "404": { description: not found }
+  /v1/images/by-code/{external_id}:
+    get:
+      summary: Full record, resolved by the producer's unique code
+      parameters:
+        - { in: path, name: external_id, required: true, schema: { type: string } }
+        - { in: query, name: profile, schema: { type: string } }
+        - { in: query, name: tenant, schema: { type: string }, description: "unscoped keys only: disambiguate a code used by several tenants" }
+      responses:
+        "200": { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
+        "404": { description: "no such external_id in this tenant" }
+        "409": { description: "unscoped caller: the code is used by several tenants; details.tenants lists them" }
+  /v1/blobs/by-code/{external_id}:
+    get:
+      summary: Redacted image bytes by unique code — the consumer hot path
+      description: >
+        One indexed lookup joined straight to the blob, bypassing JSON record
+        assembly. Measured at ~13 us of query time with 50k images. Responds to
+        If-None-Match with 304; the ETag is the redacted blob's sha256.
+      parameters:
+        - { in: path, name: external_id, required: true, schema: { type: string } }
+        - { in: query, name: profile, schema: { type: string } }
+      responses:
+        "200": { description: "image bytes; ETag + Cache-Control set" }
+        "304": { description: "If-None-Match matched" }
+        "404": { description: "no such external_id" }
+  /v1/thumbs/by-code/{external_id}:
+    get:
+      summary: Thumbnail by unique code
+      parameters: [{ in: path, name: external_id, required: true, schema: { type: string } }]
+      responses: { "200": { description: image/jpeg } }
+  # ---------------------------------------------------------------------------
+  # /ui-api/* is the DASHBOARD's surface. It is authenticated by dashboard basic
+  # auth, NOT by an API key, and every mutation requires the CSRF token. It is
+  # documented here so a port implements the same posture, but it is not part of
+  # the machine-to-machine contract -- integrators use /v1.
+  # ---------------------------------------------------------------------------
+  /ui-api/keys:
+    get:
+      security: []
+      summary: List API keys (dashboard auth; never returns a usable key)
+      responses:
+        "200": { description: "keys[], creation_enabled, note" }
+        "401": { description: "dashboard auth required" }
+    post:
+      security: []
+      summary: Mint an API key (optionally scoped) — opt-in, gated by a second secret
+      description: >
+        Requires dashboard auth, the CSRF token, `dashboard_allow_key_creation`,
+        and the X-Blurd-Admin-Secret header. Disabled by default: a minted key
+        outlives the dashboard password, so this would otherwise make one shared
+        human credential the root of trust for machine access.
+      parameters:
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+        - { in: header, name: X-Blurd-Admin-Secret, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                scope:
+                  type: object
+                  description: "omit for an unrestricted key; all constraints are ANDed"
+                  properties:
+                    tags: { type: array, items: { type: string } }
+                    metadata: { type: object, additionalProperties: { type: string } }
+      responses:
+        "201": { description: "the plaintext key (returned exactly once), plus its scope and tenant" }
+        "401": { description: "missing CSRF token or admin secret" }
+        "409": { description: "creation is disabled; details.enable says how to turn it on" }
+  /ui-api/keys/{key_id}:
+    delete:
+      security: []
+      summary: Revoke a key — always available, effective immediately
+      parameters:
+        - { in: path, name: key_id, required: true, schema: { type: string } }
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      responses:
+        "200": { description: revoked }
+        "401": { description: "missing CSRF token" }
+        "404": { description: "no such key, or already revoked" }
+  /ui-api/audit:
+    get:
+      security: []
+      summary: Recent privileged mutations
+      parameters: [{ in: query, name: limit, schema: { type: integer, default: 50, maximum: 200 } }]
+      responses: { "200": { description: "at, actor, action, target, source_ip, detail" } }
+  /v1/stats:
+    get:
+      summary: Aggregate counters
+      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, tags[]" } }

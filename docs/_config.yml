@@ -1,0 +1,26 @@
+title: blurd
+description: Face and licence-plate redaction that stores only the redacted image, never the original.
+remote_theme: just-the-docs/just-the-docs
+url: https://javimosch.github.io
+baseurl: /blurd
+
+plugins:
+  - jekyll-remote-theme
+
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "GitHub": https://github.com/javimosch/blurd
+aux_links_new_tab: true
+
+nav_external_links:
+  - title: Source on GitHub
+    url: https://github.com/javimosch/blurd
+
+# These live at the repo root and are not part of the site.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor

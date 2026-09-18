@@ -1,0 +1,132 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  seams:
+    # The cheap, high-value guard: SQL confined to db_sql.py, and the two
+    # metadata backends implementing the same function set. One second.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: python3 tests/seam_check.py
+      - run: python3 tests/schema_drift.py
+
+  conformance:
+    # The real acceptance test: 113 black-box checks against a running daemon.
+    # Matrixed over the metadata backends, because a query change can be correct
+    # on one and wrong on another.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres, mongo]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: blurd
+          POSTGRES_PASSWORD: ci-not-a-secret
+          POSTGRES_DB: blurd
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blurd" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      mongo:
+        image: mongo:7
+        env:
+          MONGO_INITDB_ROOT_USERNAME: blurd
+          MONGO_INITDB_ROOT_PASSWORD: ci-not-a-secret
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ "${{ matrix.backend }}" = "postgres" ]; then pip install "psycopg[binary]>=3.1"; fi
+          if [ "${{ matrix.backend }}" = "mongo" ]; then pip install "pymongo>=4.6"; fi
+
+      - name: Backend environment
+        run: |
+          echo "BLURD_HOME=$RUNNER_TEMP/blurd" >> $GITHUB_ENV
+          echo "BLURD_DB_BACKEND=${{ matrix.backend }}" >> $GITHUB_ENV
+          case "${{ matrix.backend }}" in
+            postgres) echo "BLURD_DB_DSN=postgresql://blurd:ci-not-a-secret@127.0.0.1:5432/blurd" >> $GITHUB_ENV ;;
+            mongo)    echo "BLURD_DB_DSN=mongodb://blurd:ci-not-a-secret@127.0.0.1:27017/?authSource=admin" >> $GITHUB_ENV
+                      echo "BLURD_DB_DATABASE=blurd" >> $GITHUB_ENV ;;
+          esac
+
+      - name: Fetch detector models
+        # Not baked into the image: one carries a GPL-3.0 lineage, so shipping
+        # it inside an artifact is a licence decision, not a packaging one.
+        run: python3 run.py models pull --all
+
+      - name: Make a test image
+        run: |
+          python3 - <<'PY'
+          import cv2, numpy as np
+          img = np.full((900, 1200, 3), 210, np.uint8)
+          cv2.rectangle(img, (150, 150), (450, 550), (120, 120, 120), -1)
+          cv2.imwrite("small.jpg", img)
+          cv2.imwrite("large.jpg", cv2.resize(img, (2400, 1800)))
+          PY
+
+      - name: Start the daemon
+        run: |
+          # The password must be set BEFORE serve: a daemon reads its config
+          # once, and without it twelve dashboard checks fail rather than skip.
+          python3 run.py dashboard-password 'ci-not-a-secret'
+          python3 run.py serve --daemon --port 8770
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8770/v1/health)" = "200" ] && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8770/v1/health
+
+      - name: Conformance
+        run: |
+          j() { python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["key"])'; }
+          K=$(python3 run.py keys add ci | j)
+          A=$(python3 run.py keys add a --scope-tag conformance-a | j)
+          B=$(python3 run.py keys add b --scope-tag conformance-b | j)
+          python3 tests/conformance.py --bin ./blurd \
+            --url http://127.0.0.1:8770 --api-key "$K" \
+            --image small.jpg --image-b large.jpg \
+            --scoped-key-a "$A" --scoped-key-b "$B" \
+            --dashboard-user admin --dashboard-password 'ci-not-a-secret'
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform && sudo mv kubeconform /usr/local/bin/
+      - run: helm lint deploy/helm/blurd --set dashboard.password=x
+      # Asserts the chart still REFUSES what it must, which is most of its value.
+      - run: bash tests/helm_guardrails.sh
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --build-arg WITH_POSTGRES=1 --build-arg WITH_MONGO=1 -t blurd:ci .
+      - name: It must run as non-root
+        run: |
+          uid=$(docker run --rm --entrypoint id blurd:ci -u)
+          echo "uid=$uid"
+          [ "$uid" = "65532" ]

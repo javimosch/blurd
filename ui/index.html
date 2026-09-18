@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blurd</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128374;</text></svg>">
+</head>
+<body>
+<header>
+  <div class="brand">blurd<span class="sub">redaction archive</span></div>
+  <div class="counters" id="counters"></div>
+</header>
+
+<section class="filters" id="img-filters">
+  <input id="f-tag" placeholder="tag (comma separated)">
+  <input id="f-meta" placeholder="metadata k=v (comma separated)">
+  <input id="f-code" placeholder="unique code (exact, or prefix*)">
+  <input id="f-sha" placeholder="sha256 prefix">
+  <div class="field"><label for="f-since">from</label>
+    <input id="f-since" type="date"></div>
+  <div class="field"><label for="f-until">to</label>
+    <input id="f-until" type="date"></div>
+  <div class="field"><label for="f-sort">sort</label>
+    <select id="f-sort">
+      <option value="created:desc">newest first</option>
+      <option value="created:asc">oldest first</option>
+      <option value="faces:desc">most faces</option>
+      <option value="plates:desc">most plates</option>
+      <option value="size:desc">largest file</option>
+      <option value="size:asc">smallest file</option>
+      <option value="review:desc">needs review first</option>
+    </select></div>
+  <div class="field"><label for="f-size">per page</label>
+    <select id="f-size"><option>24</option><option>48</option><option>96</option></select></div>
+  <label class="chk"><input type="checkbox" id="f-review"> needs review only</label>
+  <button id="apply">Filter</button>
+  <button id="reset" class="ghost">Reset</button>
+</section>
+
+<nav class="tabs">
+  <button class="tab active" data-view="images">images</button>
+  <button class="tab" data-view="jobs">jobs</button>
+  <button class="tab" data-view="keys">keys</button>
+</nav>
+
+<main id="grid" class="grid"></main>
+<section id="jobs" class="jobs" hidden>
+  <div class="filters inner">
+    <div class="field"><label for="j-status">status</label>
+      <select id="j-status"><option value="">any</option><option>queued</option>
+        <option>running</option><option>done</option><option>failed</option></select></div>
+    <input id="j-code" placeholder="unique code (exact, or prefix*)">
+    <div class="field"><label for="j-since">from</label><input id="j-since" type="date"></div>
+    <div class="field"><label for="j-until">to</label><input id="j-until" type="date"></div>
+    <div class="field"><label for="j-sort">sort</label>
+      <select id="j-sort">
+        <option value="created:desc">newest first</option>
+        <option value="created:asc">oldest first</option>
+        <option value="duration:desc">slowest</option>
+        <option value="duration:asc">fastest</option>
+        <option value="status:asc">by status</option>
+      </select></div>
+    <div class="field"><label for="j-size">per page</label>
+      <select id="j-size"><option>25</option><option>50</option><option>100</option></select></div>
+    <button id="j-apply">Filter</button>
+    <button id="j-reset" class="ghost">Reset</button>
+  </div>
+  <div id="j-body"></div>
+  <div class="pager">
+    <button id="j-first" class="ghost">&laquo; first</button>
+    <button id="j-prev" class="ghost">&larr; prev</button>
+    <span id="j-info"></span>
+    <button id="j-next" class="ghost">next &rarr;</button>
+  </div>
+</section>
+<section id="keys" class="jobs" hidden></section>
+<div id="empty" class="empty" hidden>Nothing matches these filters.</div>
+<div class="pager" id="img-pager">
+  <button id="first" class="ghost">&laquo; first</button>
+  <button id="prev" class="ghost">&larr; prev</button>
+  <span id="page-info"></span>
+  <button id="next" class="ghost">next &rarr;</button>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-inner">
+    <button id="close" class="close">&times;</button>
+    <div class="modal-body">
+      <div class="modal-img"><img id="m-img" alt="redacted image"></div>
+      <aside class="modal-meta" id="m-meta"></aside>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

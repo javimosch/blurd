@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blurd sidecar</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128225;</text></svg>">
+<style>
+:root{--bg:#0e1013;--panel:#171a1f;--line:#272c34;--ink:#e7eaee;--dim:#8b95a3;
+  --accent:#4fb0ff;--ok:#6ddc95;--warn:#ffb648;--danger:#ff6b6b;--r:6px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+header{padding:16px 22px;border-bottom:1px solid var(--line);background:var(--panel);
+  display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+h1{font-size:18px;margin:0;letter-spacing:.5px}
+header .sub{color:var(--dim);font-size:12px}
+header .flow{margin-left:auto;color:var(--dim);font-size:12px}
+header .flow b{color:var(--accent);font-weight:600}
+.wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:18px 22px;
+  align-items:start}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px}
+.panel h2{font-size:12px;letter-spacing:1.2px;text-transform:uppercase;margin:0 0 4px;
+  color:var(--accent)}
+.panel .role{color:var(--dim);font-size:12px;margin:0 0 16px}
+label{display:block;color:var(--dim);font-size:11px;margin:12px 0 4px;
+  text-transform:uppercase;letter-spacing:.8px}
+input,select,textarea{width:100%;background:#0b0d10;border:1px solid var(--line);
+  color:var(--ink);padding:8px 10px;border-radius:var(--r);font:inherit}
+input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+button{background:var(--accent);color:#04121f;border:0;padding:9px 16px;border-radius:var(--r);
+  cursor:pointer;font:inherit;font-weight:600;margin-top:14px}
+button.ghost{background:transparent;color:var(--dim);border:1px solid var(--line);font-weight:400}
+button.ghost:hover{color:var(--ink);border-color:var(--dim)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.row>*{flex:1}
+.row button{flex:0 0 auto}
+#drop{border:2px dashed var(--line);border-radius:var(--r);padding:26px;text-align:center;
+  color:var(--dim);cursor:pointer;transition:.12s;margin-top:6px}
+#drop.over{border-color:var(--accent);color:var(--accent);background:#0b0d10}
+#drop.has{border-style:solid;border-color:var(--ok);color:var(--ok)}
+pre{background:#0b0d10;border:1px solid var(--line);border-radius:var(--r);padding:11px;
+  overflow:auto;font-size:11px;max-height:340px;margin:12px 0 0;white-space:pre-wrap;
+  word-break:break-all}
+.status{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;
+  border:1px solid var(--line);margin-right:8px}
+.s-queued{border-color:var(--warn);color:var(--warn)}
+.s-running{border-color:var(--accent);color:var(--accent)}
+.s-done{border-color:var(--ok);color:var(--ok)}
+.s-failed{border-color:var(--danger);color:var(--danger)}
+.timeline{margin-top:12px;font-size:11px;color:var(--dim);line-height:1.9}
+.timeline div::before{content:"▸ ";color:var(--accent)}
+img.result{max-width:100%;border-radius:var(--r);border:1px solid var(--line);
+  margin-top:12px;background:#000;display:block}
+.hint{color:var(--dim);font-size:11px;margin-top:8px}
+.admin{grid-column:1 / -1;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:18px;display:flex;gap:26px;align-items:center;flex-wrap:wrap}
+.admin a{color:var(--accent);font-weight:600}
+.creds{color:var(--dim);font-size:12px}
+.creds b{color:var(--ink)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:12px}
+.grid figure{margin:0;cursor:pointer}
+.grid img{width:100%;height:90px;object-fit:cover;border-radius:4px;border:1px solid var(--line);
+  background:#000;display:block}
+.grid figcaption{font-size:10px;color:var(--dim);margin-top:4px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.err{color:var(--danger)}
+@media (max-width:980px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>blurd sidecar</h1>
+  <span class="sub">two external apps, one running blurd</span>
+  <span class="flow">browser &rarr; <b>sidecar (Go)</b> &rarr; blurd &nbsp;·&nbsp;
+    the API key never leaves the sidecar</span>
+</header>
+
+<div class="wrap">
+
+  <section class="panel">
+    <h2>1 · Producer</h2>
+    <p class="role">The photo-storage service. Submits an original, gets a job back
+      immediately, polls for the result. It never waits on the HTTP request.</p>
+
+    <div id="drop">drop an image here, or click to choose</div>
+    <input type="file" id="file" accept="image/*" hidden>
+
+    <label>or a URL instead of an upload</label>
+    <input id="p-url" placeholder="https://example.com/photo.jpg">
+
+    <label>unique code (external id) — defaults to the filename</label>
+    <input id="p-code" placeholder="cam3/2026-09-17/IMG_0042.jpg">
+
+    <div class="row">
+      <div>
+        <label>tags (comma separated)</label>
+        <input id="p-tags" placeholder="fleet,paris">
+      </div>
+      <div>
+        <label>on conflict</label>
+        <select id="p-conflict">
+          <option value="reuse">reuse (skip if the code is known)</option>
+          <option value="replace">replace (repoint the code)</option>
+          <option value="reject">reject (fail on mismatch)</option>
+        </select>
+      </div>
+    </div>
+
+    <label>metadata (JSON)</label>
+    <input id="p-meta" placeholder='{"site":"paris","camera":"cam3"}'>
+
+    <div class="row">
+      <button id="submit">Submit &rarr; get job</button>
+      <button id="poll" class="ghost" disabled>Check status</button>
+      <button id="follow" class="ghost" disabled>Follow to completion</button>
+    </div>
+    <div class="hint">Submit returns <b>202 + job id</b> right away. The buttons are
+      separate on purpose, so you can watch queued &rarr; running &rarr; done yourself.</div>
+
+    <div id="p-status"></div>
+    <div class="timeline" id="p-timeline"></div>
+    <pre id="p-out">(no job yet)</pre>
+  </section>
+
+  <section class="panel">
+    <h2>2 · Consumer</h2>
+    <p class="role">The user-facing app's backend. Asks for a redacted image by the
+      code it already knows — or by sha, job id, or a metadata filter.</p>
+
+    <div class="row">
+      <div>
+        <label>look up by</label>
+        <select id="c-mode">
+          <option value="code">unique code (indexed, ~13 µs)</option>
+          <option value="sha">source sha256</option>
+          <option value="job">job id</option>
+          <option value="meta">metadata filter (returns many)</option>
+        </select>
+      </div>
+    </div>
+
+    <label id="c-label">unique code</label>
+    <input id="c-value" placeholder="cam3/2026-09-17/IMG_0042.jpg">
+    <div class="hint" id="c-hint">Exactly what the producer sent as its code.</div>
+
+    <div class="row">
+      <button id="fetch">Fetch redacted image</button>
+      <button id="clear" class="ghost">Clear</button>
+    </div>
+
+    <div id="c-out"></div>
+  </section>
+
+  <section class="admin">
+    <div>
+      <div style="font-size:12px;color:var(--dim);letter-spacing:1.2px;
+                  text-transform:uppercase">3 · Admin</div>
+      <a id="dash-link" href="#" target="_blank">open the blurd dashboard &rarr;</a>
+    </div>
+    <div class="creds" id="creds">loading…</div>
+    <div class="creds" id="health">blurd: …</div>
+  </section>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let picked = null, jobId = null, seen = [];
+
+fetch("/api/config").then(r => r.json()).then(c => {
+  $("dash-link").href = c.dashboard_url;
+  $("creds").innerHTML = c.dashboard_password
+    ? `dashboard login &nbsp; user <b>${esc(c.dashboard_user)}</b> &nbsp;
+       password <b>${esc(c.dashboard_password)}</b><br>
+       blurd api key <b>${esc(c.api_key_prefix)}</b> (held by the sidecar)`
+    : `<span class="err">dashboard password not set</span> —
+       run <b>blurd dashboard-password &lt;pw&gt;</b>`;
+});
+fetch("/api/health").then(r => r.json()).then(h => {
+  $("health").innerHTML = h.ok
+    ? `blurd <b style="color:var(--ok)">healthy</b> v${esc(h.version)}`
+    : `<span class="err">blurd unreachable</span>`;
+}).catch(() => $("health").innerHTML = '<span class="err">blurd unreachable</span>');
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// --- producer ---------------------------------------------------------------
+$("drop").onclick = () => $("file").click();
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => {
+  e.preventDefault(); $("drop").classList.remove("over");
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+};
+$("file").onchange = (e) => { if (e.target.files.length) setFile(e.target.files[0]); };
+
+function setFile(f) {
+  picked = f;
+  $("drop").textContent = `${f.name}  ·  ${(f.size / 1024).toFixed(0)} KB`;
+  $("drop").classList.add("has");
+  if (!$("p-code").value) $("p-code").value = f.name;
+}
+
+function renderJob(j, note) {
+  jobId = j.job_id || jobId;
+  const s = j.status || "?";
+  $("p-status").innerHTML =
+    `<span class="status s-${esc(s)}">${esc(s)}</span>` +
+    (j.cached ? '<span class="status s-done">cache hit — not reprocessed</span>' : "") +
+    (j.duration_ms != null ? `<span class="status">${j.duration_ms} ms</span>` : "");
+  const stamp = new Date().toLocaleTimeString();
+  if (note) seen.push(`${stamp}  ${note}`);
+  $("p-timeline").innerHTML = seen.map(x => `<div>${esc(x)}</div>`).join("");
+  $("p-out").textContent = JSON.stringify(j, null, 2);
+  $("poll").disabled = $("follow").disabled = !jobId;
+  if (j.status === "done" && j.external_id) {
+    $("c-mode").value = "code";
+    $("c-value").value = j.external_id;
+    modeChanged();
+  }
+}
+
+$("submit").onclick = async () => {
+  const fd = new FormData();
+  if (picked) fd.append("image", picked);
+  if ($("p-url").value.trim()) fd.append("url", $("p-url").value.trim());
+  if (!picked && !$("p-url").value.trim()) { alert("pick a file or give a URL"); return; }
+  fd.append("code", $("p-code").value.trim());
+  fd.append("tags", $("p-tags").value.trim());
+  fd.append("metadata", $("p-meta").value.trim());
+  fd.append("on_conflict", $("p-conflict").value);
+  fd.append("wait", "0");                       // async: return the job at once
+
+  seen = []; jobId = null;
+  $("submit").disabled = true;
+  $("p-out").textContent = "submitting…";
+  try {
+    const t0 = performance.now();
+    const res = await fetch("/api/submit", { method: "POST", body: fd });
+    const body = await res.json();
+    const ms = (performance.now() - t0).toFixed(0);
+    if (!res.ok || body.ok === false) {
+      $("p-status").innerHTML = '<span class="status s-failed">rejected</span>';
+      $("p-out").textContent = JSON.stringify(body, null, 2);
+      return;
+    }
+    renderJob(body.data, `POST /v1/images → HTTP ${res.status} in ${ms} ms`);
+  } catch (e) {
+    $("p-out").textContent = "sidecar error: " + e.message;
+  } finally {
+    $("submit").disabled = false;
+  }
+};
+
+async function poll(wait) {
+  if (!jobId) return;
+  const res = await fetch(`/api/job?id=${encodeURIComponent(jobId)}&wait=${wait}`);
+  const body = await res.json();
+  if (body.ok === false) { $("p-out").textContent = JSON.stringify(body, null, 2); return; }
+  renderJob(body.data, wait ? `GET /v1/jobs/${jobId}?wait=${wait} → ${body.data.status}`
+                            : `GET /v1/jobs/${jobId} → ${body.data.status}`);
+}
+$("poll").onclick = () => poll(0);
+$("follow").onclick = () => poll(60);
+
+// --- consumer ---------------------------------------------------------------
+const MODES = {
+  code: ["unique code", "cam3/2026-09-17/IMG_0042.jpg",
+         "Exactly what the producer sent as its code. One indexed lookup."],
+  sha:  ["source sha256", "878c539a39a5feb7…",
+         "The hash of the ORIGINAL bytes, returned by the job."],
+  job:  ["job id", "job_dc5da655e95f5373",
+         "Resolves through the job record to its artifact."],
+  meta: ["metadata filter", "site=paris",
+         "k=v, comma separated. Returns every match — ~7 ms at 50k images, so this is a browse path, not the hot path."],
+};
+function modeChanged() {
+  const [label, ph, hint] = MODES[$("c-mode").value];
+  $("c-label").textContent = label;
+  $("c-value").placeholder = ph;
+  $("c-hint").textContent = hint;
+}
+$("c-mode").onchange = modeChanged;
+modeChanged();
+
+$("clear").onclick = () => { $("c-value").value = ""; $("c-out").innerHTML = ""; };
+
+$("fetch").onclick = async () => {
+  const mode = $("c-mode").value, v = $("c-value").value.trim();
+  if (!v) return;
+  $("c-out").innerHTML = "<pre>looking up…</pre>";
+  const t0 = performance.now();
+  try {
+    if (mode === "meta") {
+      const q = new URLSearchParams();
+      v.split(",").forEach(kv => {
+        const i = kv.indexOf("=");
+        if (i > 0) q.append("meta." + kv.slice(0, i).trim(), kv.slice(i + 1).trim());
+      });
+      const res = await fetch("/api/search?" + q.toString());
+      const body = await res.json();
+      const ms = (performance.now() - t0).toFixed(0);
+      if (body.ok === false) return showErr(body);
+      const items = body.data.items || [];
+      $("c-out").innerHTML =
+        `<div class="hint">${body.data.total} match(es) in ${ms} ms</div>
+         <div class="grid">` +
+        items.map(i => `<figure data-code="${esc((i.codes || [])[0] || "")}"
+                                data-sha="${esc(i.source_sha)}">
+            <img src="/api/image?sha=${encodeURIComponent(i.source_sha)}&profile=${esc(i.profile_hash)}">
+            <figcaption>${esc((i.codes || [])[0] || i.source_sha.slice(0, 12))}</figcaption>
+          </figure>`).join("") + "</div>";
+      document.querySelectorAll(".grid figure").forEach(f => f.onclick = () => {
+        $("c-mode").value = f.dataset.code ? "code" : "sha";
+        $("c-value").value = f.dataset.code || f.dataset.sha;
+        modeChanged(); $("fetch").click();
+      });
+      return;
+    }
+    const res = await fetch(`/api/lookup?${mode}=${encodeURIComponent(v)}`);
+    const body = await res.json();
+    const ms = (performance.now() - t0).toFixed(0);
+    if (!res.ok || body.ok === false) return showErr(body);
+    const rec = body.data.result || body.data;      // a job wraps its artifact
+    if (!rec || !rec.source_sha) {
+      $("c-out").innerHTML = `<pre>${esc(JSON.stringify(body.data, null, 2))}</pre>`;
+      return;
+    }
+    const src = mode === "code"
+      ? `/api/image?code=${encodeURIComponent(v)}`
+      : `/api/image?sha=${encodeURIComponent(rec.source_sha)}&profile=${rec.profile_hash}`;
+    const d = rec.stats?.detections || {};
+    $("c-out").innerHTML = `
+      <div class="hint">resolved in ${ms} ms · ${d.faces ?? "?"} face(s),
+        ${d.plates ?? "?"} plate(s) redacted
+        ${rec.needs_review ? '· <span class="err">needs review</span>' : ""}</div>
+      <img class="result" src="${src}">
+      <pre>${esc(JSON.stringify(rec, null, 2))}</pre>`;
+  } catch (e) {
+    $("c-out").innerHTML = `<pre class="err">${esc(e.message)}</pre>`;
+  }
+};
+
+function showErr(body) {
+  $("c-out").innerHTML = `<pre class="err">${esc(JSON.stringify(body, null, 2))}</pre>`;
+}
+</script>
+</body>
+</html>

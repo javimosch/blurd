@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# blurd with the venv interpreter. The optional backend drivers -- psycopg for
+# Postgres, pymongo for MongoDB -- live there rather than in the system python,
+# because a SQLite-only deployment should not be made to install either. Same
+# entry point otherwise.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
+exec "$HERE/.venv/bin/python" "$HERE/run.py" "$@"

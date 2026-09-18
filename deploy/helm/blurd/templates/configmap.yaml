@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "blurd.fullname" . }}
+  labels:
+    {{- include "blurd.labels" . | nindent 4 }}
+data:
+  # Everything here maps to config.ENV_OVERRIDES in src/config.py. It has to be
+  # environment, not a config file: a container cannot run `blurd config set`
+  # before it starts, and a running daemon reads its configuration once.
+  BLURD_HOME: /var/lib/blurd
+  BLURD_DB_BACKEND: {{ .Values.db.backend | quote }}
+  {{- if eq .Values.db.backend "mongo" }}
+  BLURD_DB_DATABASE: {{ .Values.db.database | quote }}
+  {{- end }}
+  BLURD_STORAGE_BACKEND: {{ .Values.storage.backend | quote }}
+  {{- if eq .Values.storage.backend "s3" }}
+  BLURD_S3_ENDPOINT: {{ .Values.storage.s3.endpoint | quote }}
+  BLURD_S3_BUCKET: {{ .Values.storage.s3.bucket | quote }}
+  BLURD_S3_REGION: {{ .Values.storage.s3.region | quote }}
+  {{- with .Values.storage.s3.prefix }}
+  BLURD_S3_PREFIX: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if .Values.dashboard.enabled }}
+  BLURD_DASHBOARD_USER: {{ .Values.dashboard.user | quote }}
+  {{- end }}
+  # Empty means "size yourself from the cgroup", which is the recommended
+  # setting: the limits on the pod are what choose the worker count.
+  {{- with .Values.workers }}
+  BLURD_WORKERS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.httpThreads }}
+  BLURD_HTTP_THREADS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.queueMax }}
+  BLURD_QUEUE_MAX: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.queueMaxBytes }}
+  BLURD_QUEUE_MAX_BYTES: {{ . | quote }}
+  {{- end }}
+  BLURD_ORT_ARENA: {{ ternary "1" "0" .Values.ortArena | quote }}
+  BLURD_MALLOC_TRIM: {{ ternary "1" "0" .Values.mallocTrim | quote }}
+  BLURD_DRAIN_SECONDS: {{ .Values.drainSeconds | quote }}
+  # glibc returns freed pages to the OS more readily with a bounded arena
+  # count; blurd also calls malloc_trim() between jobs.
+  MALLOC_ARENA_MAX: "2"

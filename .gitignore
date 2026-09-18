@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.onnx
+*.db
+*.db-wal
+*.db-shm
+blobs/
+sidecar/blurd-sidecar
+docs/sheets/
