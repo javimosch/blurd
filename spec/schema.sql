@@ -216,6 +216,20 @@ CREATE TABLE IF NOT EXISTS feedback (
   created_at  TEXT NOT NULL
 );
 
+-- Admin-declared public-read rules (added in 0.20.0). A rule is ONE predicate
+-- -- a tag, or a metadata key=value -- optionally bound to the tenant whose
+-- labels may satisfy it. Evaluated at read time on /pub/blobs/<sha>, so
+-- deleting a rule revokes immediately and nothing is stamped on the image.
+CREATE TABLE IF NOT EXISTS public_rules (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  tenant      TEXT,           -- NULL: labels in any tenant qualify
+  tag         TEXT,           -- set XOR meta_key
+  meta_key    TEXT,
+  meta_value  TEXT,
+  created_at  TEXT NOT NULL
+);
+
 -- ---------------------------------------------------------------------------
 -- Listing indexes (added in 0.5.0)
 -- ---------------------------------------------------------------------------

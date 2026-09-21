@@ -6,7 +6,7 @@ nav_order: 2
 
 # Deploying blurd
 
-Every shape below has been run end to end and passes the same 134 black-box
+Every shape below has been run end to end and passes the same 152 black-box
 conformance checks. Where a number appears it was measured, not estimated.
 
 This is the operator's page: *which shape do I want, and what do I type*. The
@@ -29,8 +29,8 @@ All four blob/scale combinations are supported and measured:
 
 | | local blobs | S3 blobs |
 |---|---|---|
-| **one instance** | 134/134 | 134/134 |
-| **several replicas** | 134/134 **on one shared volume** | 134/134 |
+| **one instance** | 152/152 | 152/152 |
+| **several replicas** | 152/152 **on one shared volume** | 152/152 |
 
 The only configuration that fails is several replicas with **a volume each** —
 see [What breaks, and how it looks](#6-what-breaks-and-how-it-looks).
@@ -93,7 +93,7 @@ Two things must become shared: the metadata store, and the blobs.
 
 ### Metadata: Postgres or MongoDB
 
-Both pass the same 134 checks, plus a 77-check suite that runs them side by side
+Both pass the same 152 checks, plus a 77-check suite that runs them side by side
 and asserts they answer *identically*. **Postgres is the recommendation**;
 MongoDB exists so a shop that already operates MongoDB does not have to become a
 Postgres shop. It is an operations argument, not a performance one.
@@ -131,7 +131,7 @@ nothing to size. Blobs are ~95% of the stored bytes (~333 kB per image against
 **~360 GB per million images to ~19 GB**.
 
 If you already have a ReadWriteMany volume and would rather not run object
-storage, `local` on **one shared volume** works — measured at 134/134 with three
+storage, `local` on **one shared volume** works — measured at 152/152 with three
 replicas behind a load balancer, serving byte-identical blobs from a replica
 that never processed the image.
 
@@ -352,6 +352,8 @@ environment variable:
 | `BLURD_S3_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY` / `_SECRET_KEY` / `_REGION` / `_PREFIX` | object storage |
 | `BLURD_WORKERS` / `BLURD_HTTP_THREADS` | `auto` unless you mean otherwise |
 | `BLURD_QUEUE_MAX` / `BLURD_QUEUE_MAX_BYTES` | queue bounds; bytes is the one that matters |
+| `BLURD_FETCH_MAX_BYTES` | input-size guard on every input path; default 5 MB |
+| `BLURD_STORAGE_MAX_BYTES` | cap on live redacted blobs; 0 = unlimited. Over it: expired TTL blobs are reclaimed, then writes fail `507 storage_full` |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |
 | `BLURD_DASHBOARD_USER` / `BLURD_DASHBOARD_PASSWORD` | the human dashboard only — never `/v1` |
 | `BLURD_PULL_MODELS` | fetch detector models at start |

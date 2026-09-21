@@ -22,7 +22,7 @@ from . import __version__, auth, db, jobs as jobs_mod, scope as scope_mod
 from .client import LocalClient
 from .config import Config
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
-                     NotFound, ValidationError)
+                     NotFound, RateLimited, ValidationError)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 MAX_BODY = 64 * 1024 * 1024
@@ -43,6 +43,66 @@ _ROUTES = [
 # cli-feedback-spec: open intake, but bounded.
 FEEDBACK_MAX_BYTES = 16384
 FEEDBACK_MAX_PER_MIN = 30
+
+# Per-IP fixed-window limits. /pub is unauthenticated so it gets the tight
+# bucket; everything else already demands a credential, so the bound is only
+# a floor against a misbehaving or compromised caller.
+RATE_PUBLIC_PER_MIN = 60
+RATE_API_PER_MIN = 300
+
+
+class _RateLimiter:
+    """Fixed-window per-IP buckets with grouped audit events.
+
+    Blocked hits accumulate in memory per (class, ip, window) and are flushed
+    as ONE audit row per window when it closes -- a flood produces one event
+    with a count, not one row per request. Flushing is lazy (on the next hit)
+    plus hooked into the queue's sweep so events survive a burst that then
+    goes quiet.
+    """
+    WINDOW = 60
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self._lock = threading.Lock()
+        self._hits = {}        # (cls, ip, window) -> requests seen
+        self._blocked = {}     # (cls, ip, window) -> [count, path]
+
+    def hit(self, cls: str, ip: str, path: str, limit: int) -> bool:
+        w = int(time.time() // self.WINDOW)
+        with self._lock:
+            k = (cls, ip, w)
+            self._hits[k] = self._hits.get(k, 0) + 1
+            over = self._hits[k] > limit
+            if over:
+                ent = self._blocked.setdefault(k, [0, path])
+                ent[0] += 1
+            self._gc(w)
+        # Cheap early-out when nothing is pending; the queue sweep also calls
+        # this so a burst that goes quiet still surfaces.
+        self.flush()
+        return not over
+
+    def _gc(self, w: int):
+        self._hits = {k: v for k, v in self._hits.items() if k[2] >= w - 1}
+
+    def flush(self):
+        """Write finished windows' blocked counts to the audit log."""
+        w = int(time.time() // self.WINDOW)
+        with self._lock:
+            done = {k: self._blocked.pop(k)
+                    for k in list(self._blocked) if k[2] < w}
+        if not done:
+            return
+        conn = db.connect(self._cfg.db_file)
+        for (cls, ip, _), (count, path) in done.items():
+            try:
+                db.audit(conn, "ratelimit", "rate_limited", path, ip,
+                         {"class": cls, "blocked": count})
+            except Exception:
+                pass      # surfacing events must never break a request path
+        # No conn.close(): connect() returns the calling thread's cached
+        # connection -- closing it would kill every later query on the thread.
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -112,6 +172,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._daemon_health()
             if path.rstrip("/") == "/_shutdown" and method == "POST":
                 return self._daemon_shutdown()
+            # Per-IP buckets. The daemon endpoints above are exempt: an
+            # orchestrator probing health must not be able to lock itself out.
+            public = path.startswith("/pub/")
+            limit = RATE_PUBLIC_PER_MIN if public else RATE_API_PER_MIN
+            if not self.server.blurd_rate.hit(
+                    "public" if public else "api",
+                    self.client_address[0], path, limit):
+                raise RateLimited(
+                    f"Rate limit exceeded ({limit}/min for "
+                    f"{'public' if public else 'authenticated'} endpoints)",
+                    {"limit_per_min": limit,
+                     "class": "public" if public else "api"},
+                    retry_after=_RateLimiter.WINDOW)
+            if public:
+                return self._pub(method, path)
             if path.startswith("/v1/"):
                 return self._api(method, path)
             return self._ui(method, path)
@@ -375,7 +450,10 @@ class Handler(BaseHTTPRequestHandler):
                                   with_thumb=True)
         if row is None:
             raise NotFound("external_id", code)
-        self._check_expired(conn, row, "external_id", code)
+        # Thumbs outlive their blob: the dashboard still renders an expired
+        # card instead of a hole. Only byte reads 410.
+        if not thumb:
+            self._check_expired(conn, row, "external_id", code)
         if thumb:
             return self._send_cached(row["thumb"] or b"", "image/jpeg",
                                      (row["blob_sha"] or "")[:32] + "-t")
@@ -413,7 +491,8 @@ class Handler(BaseHTTPRequestHandler):
         if scope is not None and not scope.is_global:
             if not scope.allows_sha(conn, row["source_sha"]):
                 raise NotFound("image", sha)
-        self._check_expired(conn, row, "image", sha)
+        if not thumb:
+            self._check_expired(conn, row, "image", sha)
         if thumb:
             return self._send_cached(row["thumb"] or b"", "image/jpeg",
                                      (row["blob_sha"] or "")[:32] + "-t")
@@ -422,6 +501,23 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Disposition": f'inline; filename="{row["source_sha"][:16]}.jpg"',
             "X-Blurd-Source-Sha": row["source_sha"],
         })
+
+    # -- public blobs ----------------------------------------------------------
+    def _pub(self, method, path):
+        """Unauthenticated reads, gated by admin-declared rules instead of a
+        key. Sha-addressed only: codes are caller-chosen strings (filenames,
+        order numbers) and are enumerable; a 64-hex sha is not. Missing image,
+        non-matching labels and revoked rules all collapse to the same 404 --
+        the endpoint must not confirm what it refuses to serve."""
+        conn = db.connect(self.server.blurd_cfg.db_file)
+        m = re.match(r"^/pub/blobs/(?P<sha>[0-9a-f]{64})$", path)
+        if not m or method != "GET":
+            raise NotFound("endpoint", path)
+        sha = m.group("sha")
+        if not db.image_is_public(conn, sha):
+            raise NotFound("image", sha)
+        return self._serve_image(self.server.blurd_client, conn, sha,
+                                 self._one(self._query(), "profile"))
 
     # -- dashboard ------------------------------------------------------------
     def _ui(self, method, path):
@@ -493,6 +589,24 @@ class Handler(BaseHTTPRequestHandler):
         if sub.rstrip("/") == "/audit":
             return self._send(200, {"ok": True, "data": db.audit_list(
                 conn, min(int(self._one(q, "limit", 50) or 50), 200))})
+        if sub.rstrip("/") == "/public-rules":
+            if self.command == "POST":
+                payload = json.loads(self._body() or b"{}")
+                rule = _public_rule(conn, payload)
+                db.audit(conn, "dashboard", "public_rule.create",
+                         rule["id"], self.address_string(), rule)
+                conn.commit()
+                return self._send(200, {"ok": True, "data": rule})
+            return self._send(200, {"ok": True,
+                                    "data": db.public_rules(conn)})
+        m = re.match(r"^/public-rules/(?P<rid>rule_[0-9a-f]{8,32})$", sub)
+        if m and self.command == "DELETE":
+            if not db.public_rule_del(conn, m.group("rid")):
+                raise NotFound("public_rule", m.group("rid"))
+            db.audit(conn, "dashboard", "public_rule.delete",
+                     m.group("rid"), self.address_string())
+            conn.commit()
+            return self._send(200, {"ok": True, "data": {"deleted": True}})
         if sub.rstrip("/") == "/images":
             return self._send(200, {"ok": True, "data": client.list(**_filters(q))})
         if sub.rstrip("/") == "/stats":
@@ -518,6 +632,33 @@ class Handler(BaseHTTPRequestHandler):
                                      self._one(q, "profile"),
                                      thumb=sub.startswith("/thumbs"))
         raise NotFound("endpoint", sub)
+
+
+def _public_rule(conn, payload: dict) -> dict:
+    """Validate a public-read rule: ONE predicate (a tag or a meta k=v),
+    optionally bound to the tenant whose labels may satisfy it. A rule with
+    no predicate would publish everything, which is why it cannot be empty."""
+    name = str(payload.get("name") or "").strip()[:80]
+    if not name:
+        raise ValidationError("public rule requires a 'name'")
+    tag = (str(payload.get("tag")).strip()[:120]
+           if payload.get("tag") is not None else None)
+    mk = (str(payload.get("meta_key")).strip()[:80]
+          if payload.get("meta_key") is not None else None)
+    mv = (str(payload.get("meta_value")).strip()[:240]
+          if payload.get("meta_value") is not None else None)
+    if tag and mk:
+        raise ValidationError(
+            "a public rule takes ONE predicate: 'tag' or 'meta_key'/'meta_value'")
+    if bool(mk) != bool(mv):
+        raise ValidationError("meta rules need both 'meta_key' and 'meta_value'")
+    if not tag and not mk:
+        raise ValidationError(
+            "a public rule needs a predicate: 'tag' or 'meta_key'/'meta_value'")
+    tenant = (str(payload.get("tenant")).strip()[:80]
+              if payload.get("tenant") else None)
+    return db.public_rule_add(conn, f"rule_{secrets.token_hex(8)}", name,
+                              tenant, tag, mk, mv)
 
 
 def _db_kind() -> str:
@@ -554,6 +695,7 @@ def _job_filters(q):
     one = lambda k, d=None: (q.get(k) or [d])[0]
     return {
         "status": one("status"), "code": one("code"),
+        "sha": one("sha"), "tag": one("tag"),
         "since": one("since"), "until": one("until"),
         "sort": one("sort", "created"), "direction": one("direction", "desc"),
         "cursor": one("cursor"),
@@ -642,6 +784,10 @@ class BlurdServer(BoundedThreadingHTTPServer):
         self.blurd_client = LocalClient(cfg, queue=self.blurd_queue)
         self.blurd_log = log or (lambda m: None)
         self.blurd_feedback_hits = {}   # per-IP rate window for /v1/feedback
+        self.blurd_rate = _RateLimiter(cfg)
+        # Blocked-request events flush to the audit log on each hit; the sweep
+        # covers a burst that goes quiet before another request arrives.
+        self.blurd_queue.on_sweep = self.blurd_rate.flush
 
     def _register_instance(self):
         """Claim a slot, and refuse to share a SQLite file with a peer.

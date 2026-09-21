@@ -115,3 +115,4 @@ pre{background:#0b0d10;border:1px solid var(--line);border-radius:var(--radius);
 .chip.active{background:var(--accent);border-color:var(--accent);color:#fff}
 .pill.tag{cursor:pointer}
 .pill.tag:hover{border-color:var(--accent);color:var(--accent)}
+.pill.warn{border-color:var(--warn);color:var(--warn)}

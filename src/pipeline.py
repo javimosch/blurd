@@ -17,7 +17,7 @@ import numpy as np
 from . import db, detect, fetch, redact, store
 from .canonical import canonical_json, sha256_hex
 from .config import Config
-from .errors import ValidationError
+from .errors import StorageFull, ValidationError
 
 THUMB_MAX = 320
 
@@ -187,6 +187,7 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     # Object first, row second. An orphaned object is garbage a sweep can find;
     # a row pointing at an object that was never written is a broken record.
     rel = store.rel_path(sha, phash, ext)
+    _check_storage_cap(cfg, conn, blobs, len(blob))
     blobs.put(rel, blob, out_mime)
     timer.mark("store_ms", t0)
 
@@ -222,10 +223,44 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
         "thumb": thumb, "created_at": db.now(),
         "expires_at": _expires_at(profile),
     }, [d.as_dict() for d in dets])
+    if aid is None:
+        # Lost the dedup race: a concurrent job inserted the same
+        # (source_sha, profile_hash) first. Our blob write went to the same
+        # rel path so nothing is orphaned; serve the winner's artifact as a
+        # cache hit.
+        conn.commit()
+        winner = db.find_artifact(conn, sha, phash)
+        return artifact_result(cfg, conn, winner, cached=True, tenant=tenant)
     conn.commit()
 
     row = db.find_artifact_by_id(conn, aid)
     return artifact_result(cfg, conn, row, cached=False, tenant=tenant)
+
+
+def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
+    """Refuse the write when live blobs would exceed `storage.max_bytes`.
+
+    Expired-first: overdue TTL blobs are reclaimed before refusing, so a cap
+    and a TTL together bound the disk without rejecting work. Same semantics
+    as JobQueue.prune_expired -- bounded pass, deletes are idempotent.
+    """
+    cap = int(cfg.get("storage.max_bytes") or 0)
+    if not cap:
+        return
+    if db.live_blob_bytes(conn) + incoming > cap:
+        for r in db.expired_blobs(conn, 200):
+            try:
+                blobs.delete(r["blob_path"])
+            except Exception:
+                pass
+            db.expire_artifact(conn, r["id"])
+        conn.commit()
+    usage = db.live_blob_bytes(conn)
+    if usage + incoming > cap:
+        raise StorageFull(
+            f"Blob storage full: {usage + incoming} bytes would exceed the "
+            f"{cap} cap", details={"usage_bytes": usage, "cap_bytes": cap,
+                                   "incoming_bytes": incoming})
 
 
 def _expires_at(profile: dict) -> Optional[str]:

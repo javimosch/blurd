@@ -9,7 +9,7 @@ is reduced to a sha256 that links the artifact back to its origin and prevents
 reprocessing the same bytes twice.
 
 > **Status: proof of concept.** Everything described here is built, running and
-> covered by 107 black-box conformance checks, and every performance number is
+> covered by 152 black-box conformance checks, and every performance number is
 > measured rather than estimated. It has not been run in production.
 
 ---
@@ -215,9 +215,10 @@ POST /v1/images ─► validate (scheme/DNS/IP) ─► enqueue ─► 202 + job 
 ### Ephemeral outputs (TTL)
 
 `--ttl 86400` (or `profile.storage.ttl` in the API) prunes the redacted blob
-and thumbnail after the deadline — for callers who keep the output themselves
-and only need blurd as a transform. The artifact record, codes, tags and
-detections survive; a fetch past the deadline answers **410
+after the deadline — for callers who keep the output themselves and only need
+blurd as a transform. The artifact record, codes, tags, detections **and
+thumbnail** survive — the dashboard renders an expired card, not a hole — and a
+blob fetch past the deadline answers **410
 `resource_expired`** (distinct from 404), and resubmitting the same source
 under the same code regenerates it. TTL is part of `profile_hash`, so an
 expiring output can never collide with the permanent one. A sweeper on the
@@ -364,7 +365,7 @@ replica; **blobs** decide whether those replicas can serve each other's work.
 | metadata | SQLite (a file) | Postgres **or** MongoDB |
 | blobs | local disk **or** S3 | S3 **or** one shared (RWX) volume |
 
-Every combination above passes the same 134 checks — on SQLite, Postgres and
+Every combination above passes the same 152 checks — on SQLite, Postgres and
 MongoDB, on local and S3 blobs, single-instance and behind a load balancer.
 The one configuration that fails is several replicas with a **volume each**:
 the metadata read succeeds while the blob 404s on whichever replica did not
@@ -393,6 +394,12 @@ The queue is bounded by **bytes, not job count** — queued uploads live in RAM 
 design, so a job-count bound promised nothing about memory. Overflow is HTTP 503
 with `Retry-After`: backpressure, not failure. Sizing, the onnxruntime arena
 finding and the untaken options: [`spec/resources.md`](spec/resources.md).
+
+The disk gets a bound too: `storage.max_bytes` (`BLURD_STORAGE_MAX_BYTES`, 0 =
+unlimited) caps the bytes held by **live** redacted blobs — thumbnails and
+metadata stay outside the budget. A write that would exceed it first reclaims
+expired TTL blobs, then fails `507 storage_full` if it still does not fit. On a
+demo VM, `1 GB` + a 24 h TTL means the disk is bounded in both dimensions.
 
 ## Scaling the admin UI
 
@@ -457,10 +464,23 @@ automatic, is in `spec/scaling.md`.
   IP re-validated **at every hop**, and byte/pixel/time/content-type caps apply.
   Without that, a URL-fetching API inside a VPC is a port scanner and a
   metadata-service reader.
+- **Every path is rate-limited per IP**: 60/min on `/pub/*`, 300/min on
+  everything else (`/_health` exempt). Excess gets a typed 429 `rate_limited`
+  with `retry_after`, and bursts surface in the audit log as one grouped event
+  per window — not one row per blocked request.
+- **Public reads are admin-declared, never caller-declared.** A rule on the
+  dashboard's public tab (one tag or one `k=v` metadata match, optionally bound
+  to a tenant) lets `GET /pub/blobs/<sha>` serve the matching redacted bytes
+  with no key. Rules are evaluated at read time so deletion revokes on the next
+  request; the URL is sha-addressed only, because an enumerable code would be a
+  guessing oracle. An image outside every rule — and a revoked one — is the
+  same 404 as an image that does not exist.
+- **Audit rows are pruned past 30 days.** A long-lived instance does not grow
+  its home on traffic alone.
 
 ## Dashboard
 
-`http://127.0.0.1:8770/` behind basic auth. Two tabs:
+`http://127.0.0.1:8770/` behind basic auth. Four tabs:
 
 - **images** — thumbnail grid of every stored redaction, filters by unique code
   (exact or `prefix*`), tag, metadata `k=v`, sha prefix and needs-review; detail
@@ -471,6 +491,9 @@ automatic, is in `spec/scaling.md`.
 - **keys** — every API key with its prefix, creation time, last use and status,
   a revoke button, the gated create form, and the audit trail underneath.
   See `spec/dashboard-auth.md` for the reasoning.
+- **public** — the rules that make `GET /pub/blobs/<sha>` serve a redacted
+  image with no API key (tag or metadata `k=v`, optional tenant pin), plus the
+  grouped rate-limit events the limiter has emitted.
 
 ## Feedback
 
@@ -485,7 +508,7 @@ endpoint in that order.
 
 ## Storage
 
-Three metadata backends, one environment variable, the same 134 conformance
+Three metadata backends, one environment variable, the same 152 conformance
 checks on each:
 
 | `BLURD_DB_BACKEND` | store | for |
@@ -520,13 +543,13 @@ or **machin-only** implementation is a rewrite of the *daemon*, not of the
 - `spec/` holds the wire format, the SQL schema, the blob layout and the
   `profile_hash` algorithm, language-neutrally.
 - `tests/conformance.py` tests *a binary and a base URL*. A port is done when
-  it passes those 134 checks unchanged.
+  it passes those 152 checks unchanged.
 - The HTTP surface uses stdlib `http.server` and raw-body uploads rather than a
   framework and multipart, so nothing in the contract is Python-shaped.
 
 ## Status
 
-POC. Verified end to end by `tests/conformance.py` (134 checks, all passing on SQLite, Postgres, MongoDB, and a three-replica cluster) and `tests/backend_parity.py` (77 checks that two backends answer identically)
+POC. Verified end to end by `tests/conformance.py` (152 checks, all passing on SQLite, Postgres, MongoDB, and a three-replica cluster) and `tests/backend_parity.py` (77 checks that two backends answer identically)
 plus a cold start from an empty home: CLI, API, async jobs, unique-code
 resolution and short-circuiting, conflict policy, ETag/304, dashboard, sidecar,
 cache behaviour, SSRF guards, CSRF guards, dashboard/API credential separation,

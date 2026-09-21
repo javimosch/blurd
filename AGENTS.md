@@ -209,7 +209,13 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
     initialises the whole home (it creates `blobs/` alongside `models/`), so an
     init container mounting only the models volume writes into the image's
     directory and fails with EACCES on every deploy.
-43. **A container with no cgroup limits sizes itself from the NODE.** That is
+43. **`insert_artifact` returns None on a dedup race**, not an exception.
+    Two workers can legitimately process the same `(source_sha, profile_hash)`
+    at once; the loser must resolve to the winner's row. Never let the unique
+    constraint escape as `internal_error`, and never share a `.part` temp name
+    between writers in `store.put` -- both were real races found in a 1k-image
+    batch.
+44. **A container with no cgroup limits sizes itself from the NODE.** That is
     why the Helm chart refuses to render without `resources.limits`. It is the
     single most damaging misconfiguration available and it presents as a random
     OOM kill.
@@ -260,3 +266,14 @@ acceptance test for a port. Run it on **every backend the change could touch**.
 Build with `cd sidecar && go build -o blurd-sidecar .`. It exists to make the
 topology testable: the browser talks only to the sidecar, and the blurd API key
 never leaves that process.
+
+46. **Public reads are rule-gated and sha-addressed, never by code.** Codes are
+    caller-chosen, enumerable strings; `/pub/blobs/<sha>` only. Rules are
+    evaluated at read time against the image's labels so deletion revokes
+    immediately — and a rule can pin which tenant's labels qualify, because
+    tags are caller-controlled. Non-matching and missing both answer 404.
+47. **Rate limiting is per-IP fixed-window, in `src/server.py`.** Public paths
+    get 60/min, everything else 300/min; `/_health` and `/_shutdown` are exempt
+    so an orchestrator cannot lock itself out. Blocked hits flush to `audit`
+    as ONE row per (class, ip, window) — grouped, not per-request. Audit rows
+    (including these events) are pruned past 30 days in the reaper sweep.

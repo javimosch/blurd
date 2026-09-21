@@ -53,10 +53,11 @@ class LocalClient:
 
     def jobs(self, status=None, code=None, limit=50, offset=0, scope: Scope = None,
              since=None, until=None, sort="created", direction="desc",
-             cursor=None) -> Dict[str, Any]:
+             cursor=None, sha=None, tag=None) -> Dict[str, Any]:
         conn = db.connect(self.cfg.db_file)
         tenant = _tenant(scope)
-        res = db.query_jobs(conn, status=status, code=code, since=since, until=until,
+        res = db.query_jobs(conn, status=status, code=code, sha=sha, tag=tag,
+                            since=since, until=until,
                             tenant=tenant, sort=sort, direction=direction,
                             cursor=cursor, limit=limit, offset=offset)
         return {"total": res["total"], "total_capped": res["total_capped"],
@@ -150,6 +151,8 @@ class LocalClient:
         s = db.stats(conn, scope)
         s["queue"] = self.queue.depth(scope)
         s["home"] = str(self.cfg.home)
+        if scope is None or scope.is_global:
+            s["storage_max_bytes"] = int(self.cfg.get("storage.max_bytes") or 0)
         s["profile_hash"] = Config.hash_of(self.cfg.resolve_profile())
         return s
 
@@ -286,12 +289,17 @@ class RemoteClient:
                           query={"wait": str(wait)} if wait else None,
                           timeout=self.timeout + (wait or 0))
 
-    def jobs(self, status=None, code=None, limit=50, offset=0):
+    def jobs(self, status=None, code=None, limit=50, offset=0,
+             sha=None, tag=None):
         q = {"limit": limit, "offset": offset}
         if status:
             q["status"] = status
         if code:
             q["code"] = code
+        if sha:
+            q["sha"] = sha
+        if tag:
+            q["tag"] = tag
         return self._call("GET", "/v1/jobs", query=q)
 
     def by_code(self, code, profile=None):

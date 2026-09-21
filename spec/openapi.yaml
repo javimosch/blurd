@@ -250,6 +250,8 @@ paths:
       parameters:
         - { in: query, name: status, schema: { type: string, enum: [queued, running, done, failed] } }
         - { in: query, name: code, schema: { type: string } }
+        - { in: query, name: sha, schema: { type: string }, description: "source_sha prefix" }
+        - { in: query, name: tag, schema: { type: string }, description: "matches the job's submission-time tags snapshot" }
         - { in: query, name: since, schema: { type: string } }
         - { in: query, name: until, schema: { type: string } }
         - { in: query, name: sort, schema: { type: string, enum: [created, duration, status], default: created } }
@@ -302,6 +304,27 @@ paths:
       summary: Thumbnail by unique code
       parameters: [{ in: path, name: external_id, required: true, schema: { type: string } }]
       responses: { "200": { description: image/jpeg } }
+  # ---------------------------------------------------------------------------
+  # /pub/* is UNAUTHENTICATED. An image is served only when an admin-declared
+  # public rule (dashboard → public tab) matches its labels, evaluated at read
+  # time so deleting the rule revokes on the next request. Sha-addressed only:
+  # external codes are enumerable strings and must never be public handles.
+  # Missing image, unmatched labels and revoked rules all return the same 404.
+  # Public paths are rate-limited per IP (60/min) -- 429 is typed
+  # `rate_limited`; authenticated paths have their own bucket (300/min).
+  # ---------------------------------------------------------------------------
+  /pub/blobs/{sha}:
+    get:
+      summary: Redacted image bytes, no key — only when a public rule matches
+      security: []
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string, pattern: "^[0-9a-f]{64}$" } }
+        - { in: query, name: profile, schema: { type: string } }
+      responses:
+        "200": { description: "image bytes; ETag + Cache-Control set" }
+        "404": { description: "no such image, or no public rule matches it" }
+        "410": { description: "resource_expired: TTL'd blob was pruned" }
+        "429": { description: "rate_limited: over 60/min from this address" }
   # ---------------------------------------------------------------------------
   # /ui-api/* is the DASHBOARD's surface. It is authenticated by dashboard basic
   # auth, NOT by an API key, and every mutation requires the CSRF token. It is
@@ -364,4 +387,4 @@ paths:
   /v1/stats:
     get:
       summary: Aggregate counters
-      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, tags[]" } }
+      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, tags[]" } }

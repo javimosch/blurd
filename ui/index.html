@@ -44,6 +44,7 @@
   <button class="tab active" data-view="images">images</button>
   <button class="tab" data-view="jobs">jobs</button>
   <button class="tab" data-view="keys">keys</button>
+  <button class="tab" data-view="public">public</button>
 </nav>
 
 <main id="grid" class="grid"></main>
@@ -53,6 +54,8 @@
       <select id="j-status"><option value="">any</option><option>queued</option>
         <option>running</option><option>done</option><option>failed</option></select></div>
     <input id="j-code" placeholder="unique code (exact, or prefix*)">
+    <input id="j-sha" placeholder="sha256 prefix">
+    <input id="j-tag" placeholder="tag (submission snapshot)">
     <div class="field"><label for="j-since">from</label><input id="j-since" type="date"></div>
     <div class="field"><label for="j-until">to</label><input id="j-until" type="date"></div>
     <div class="field"><label for="j-sort">sort</label>
@@ -77,6 +80,7 @@
   </div>
 </section>
 <section id="keys" class="jobs" hidden></section>
+<section id="public" class="jobs" hidden></section>
 <div id="empty" class="empty" hidden>Nothing matches these filters.</div>
 <div class="pager" id="img-pager">
   <button id="first" class="ghost">&laquo; first</button>

@@ -117,3 +117,27 @@ lifecycle become the object store's job.
 multiple replicas are not yet possible. That is the next backend to replace — and
 once it is, replicas work without a shared queue, because each replica processes
 what it accepts and any replica can serve the result. See `spec/capacity.md`.
+
+## Bounding the disk: `storage.max_bytes`
+
+`storage.max_bytes` (env `BLURD_STORAGE_MAX_BYTES`, default 0 = unlimited) is a
+hard cap on **live** blob bytes, counted as `SUM(artifacts.blob_size)` over
+rows whose `blob_path` is still set — the metadata DB is the meter, so the cap
+works identically on `local` and `s3` and needs no `du` or bucket listing.
+Thumbnails and metadata stay outside the budget: they are small, and they are
+what let the dashboard show an expired artifact rather than a hole.
+
+When a write would exceed the cap the pipeline first reclaims overdue TTL
+blobs (the same bounded, idempotent sweep the reaper runs), and only if the
+blob still does not fit fails the job with `507 storage_full` — recoverable,
+with `retry_after`. A cap plus a TTL therefore bound the disk in both
+dimensions: how much, and for how long.
+
+`/v1/stats` exposes `bytes_live` and `storage_max_bytes` on the unrestricted
+view; scoped keys still cannot read instance size.
+
+## TTL expiry semantics
+
+An artifact past `expires_at` keeps its row, its thumbnail, its codes and its
+detections; only the blob object is deleted and `blob_path` cleared. Blob
+reads answer `410 resource_expired`; thumbnail reads keep answering 200.

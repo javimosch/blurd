@@ -61,6 +61,13 @@ DEFAULTS = {
         "backend": "local",
         "s3": {"endpoint": None, "bucket": None, "region": "us-east-1",
                "prefix": "", "path_style": True},
+        # Hard cap on live redacted blobs, in bytes; 0 = unlimited. Counted
+        # from artifacts.blob_size (backend-agnostic -- works for s3 too), so
+        # thumbnails and metadata are outside the budget. Over cap: expired
+        # blobs are pruned first, then the write is refused with 507
+        # `storage_full`. Set it on any box where disk exhaustion is the
+        # failure to prevent (demo VMs, shared hosts).
+        "max_bytes": 0,
     },
     # Seconds to let in-flight jobs finish after SIGTERM. Should sit inside
     # the orchestrator's grace period (k8s terminationGracePeriodSeconds).
@@ -191,6 +198,7 @@ ENV_OVERRIDES = {
     "BLURD_ORT_ARENA": ("ort_arena", str),
     "BLURD_DRAIN_SECONDS": ("drain_seconds", int),
     "BLURD_FETCH_MAX_BYTES": ("fetch.max_bytes", int),
+    "BLURD_STORAGE_MAX_BYTES": ("storage.max_bytes", int),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),

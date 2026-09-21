@@ -95,6 +95,8 @@ function card(item) {
         <span class="pill face">${item.n_faces} face</span>
         <span class="pill plate">${item.n_plates} plate</span>
         ${item.needs_review ? '<span class="pill review">review</span>' : ""}
+        ${item.expires_at && item.expires_at <= new Date().toISOString()
+            ? '<span class="pill warn">expired</span>' : ""}
       </div>
       <div>${tags}</div>
     </div>`;
@@ -236,6 +238,8 @@ function jobQuery() {
   const q = new URLSearchParams();
   if ($("j-status").value) q.set("status", $("j-status").value);
   if ($("j-code").value.trim()) q.set("code", $("j-code").value.trim());
+  if ($("j-sha").value.trim()) q.set("sha", $("j-sha").value.trim());
+  if ($("j-tag").value.trim()) q.set("tag", $("j-tag").value.trim());
   if ($("j-since").value) q.set("since", dayStart($("j-since").value));
   if ($("j-until").value) q.set("until", dayEnd($("j-until").value));
   const [sort, direction] = $("j-sort").value.split(":");
@@ -345,7 +349,8 @@ async function loadKeys() {
           <th>target</th><th>from</th></tr></thead><tbody>` +
         (log.length ? log.map((a) => `<tr>
             <td>${esc(a.at)}</td><td class="code">${esc(a.actor)}</td>
-            <td class="id">${esc(a.action)}</td>
+            <td class="id">${esc(a.action)}${a.detail?.blocked
+                  ? ` <span class="pill warn">×${a.detail.blocked}</span>` : ""}</td>
             <td>${esc(a.target || "—")}</td><td>${esc(a.source_ip || "—")}</td>
           </tr>`).join("")
           : `<tr><td colspan="5">no privileged mutations recorded</td></tr>`) +
@@ -407,6 +412,97 @@ async function loadKeys() {
   }
 }
 
+async function loadPublic() {
+  const el = $("public");
+  try {
+    const rules = await api("/public-rules");
+    el.innerHTML = `
+      <div class="notice">
+        <b>Public blob URLs.</b> A rule publishes every image carrying its
+        predicate — one tag <i>or</i> one metadata <code>k=v</code>, optionally
+        limited to a tenant's labels. Public reads are
+        <code>GET /pub/blobs/&lt;sha&gt;</code> — no API key, no code lookup
+        (codes are enumerable; a sha256 is not). Rules are evaluated on every
+        request, so deleting one revokes access immediately. Public endpoints
+        are rate-limited per address; blocked bursts appear in the audit
+        trail below.
+      </div>
+      <div class="mintbox">
+        <div><label>name</label>
+          <input id="pr-name" placeholder="geored public dataset"></div>
+        <div><label>tag</label><input id="pr-tag" placeholder="geored:public"></div>
+        <div><label>or metadata</label>
+          <input id="pr-meta" placeholder="visibility=public"></div>
+        <div><label>tenant (optional)</label>
+          <input id="pr-tenant" placeholder="only this tenant's labels count"></div>
+        <button id="pr-add">Add rule</button>
+      </div>
+      <table><thead><tr><th>name</th><th>predicate</th><th>tenant</th>
+        <th>created</th><th></th></tr></thead><tbody>` +
+      (rules.length ? rules.map((r) => `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="code">${r.tag ? `tag: ${esc(r.tag)}`
+            : `meta: ${esc(r.meta_key)}=${esc(r.meta_value)}`}</td>
+        <td>${r.tenant ? `<span class="pill">${esc(r.tenant)}</span>`
+            : '<span style="color:var(--dim)">any</span>'}</td>
+        <td>${esc(r.created_at)}</td>
+        <td><button class="ghost pr-del" data-id="${esc(r.id)}"
+                    data-name="${esc(r.name)}">delete</button></td>
+      </tr>`).join("")
+        : `<tr><td colspan="5">no public rules — everything requires a key</td></tr>`) +
+      "</tbody></table>";
+
+    // Rate-limited bursts surface here, already grouped: one row per
+    // (address, window), with the suppressed-hit count in detail.blocked.
+    try {
+      const log = await api("/audit?limit=200");
+      const hits = log.filter((a) => a.action === "rate_limited").slice(0, 25);
+      el.insertAdjacentHTML("beforeend", `
+        <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                   color:var(--dim);margin:26px 0 8px">rate-limit events</h3>
+        <table><thead><tr><th>when</th><th>class</th><th>path</th>
+          <th>from</th><th>blocked</th></tr></thead><tbody>` +
+        (hits.length ? hits.map((a) => `<tr>
+            <td>${esc(a.at)}</td><td>${esc(a.detail?.class || "—")}</td>
+            <td class="code">${esc(a.target || "—")}</td>
+            <td>${esc(a.source_ip || "—")}</td>
+            <td><span class="pill warn">×${a.detail?.blocked || 1}</span></td>
+          </tr>`).join("")
+          : `<tr><td colspan="5">no rate-limit events</td></tr>`) +
+        "</tbody></table>");
+    } catch (_) { /* informational */ }
+
+    el.querySelectorAll(".pr-del").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm(`Delete rule "${b.dataset.name}"? Public URLs it granted stop working immediately.`)) return;
+        try { await api(`/public-rules/${b.dataset.id}`, { method: "DELETE" }); loadPublic(); }
+        catch (err) { alert(err.message); }
+      };
+    });
+    $("pr-add").onclick = async () => {
+      const name = $("pr-name").value.trim();
+      const tag = $("pr-tag").value.trim();
+      const meta = $("pr-meta").value.trim();
+      const tenant = $("pr-tenant").value.trim();
+      if (!name) { alert("give the rule a name"); return; }
+      const body = { name };
+      if (tag) body.tag = tag;
+      if (meta) {
+        const i = meta.indexOf("=");
+        if (i <= 0) { alert("metadata predicate must be k=v"); return; }
+        body.meta_key = meta.slice(0, i).trim();
+        body.meta_value = meta.slice(i + 1).trim();
+      }
+      if (tenant) body.tenant = tenant;
+      try { await api("/public-rules", { method: "POST", body: JSON.stringify(body) });
+            loadPublic(); }
+      catch (err) { alert(err.message); }
+    };
+  } catch (err) {
+    el.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
 document.querySelectorAll(".tab").forEach((t) => {
   t.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
@@ -415,6 +511,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     const images = view === "images";
     $("jobs").hidden = view !== "jobs";
     $("keys").hidden = view !== "keys";
+    $("public").hidden = view !== "public";
     $("grid").hidden = !images;
     // By id, not by class: `#jobs` sits BEFORE the images pager in the DOM, so
     // querySelector(".pager") picks the jobs one and hides it exactly when the
@@ -424,6 +521,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     $("empty").hidden = true;
     if (images) load();
     else if (view === "jobs") loadJobs();
+    else if (view === "public") loadPublic();
     else loadKeys();
   };
 });
@@ -459,13 +557,14 @@ wirePager(state, { prev: "prev", next: "next", first: "first" }, load);
 
 $("j-apply").onclick = () => { resetPager(jstate); loadJobs(); };
 $("j-reset").onclick = () => {
-  ["j-code", "j-since", "j-until"].forEach((i) => ($(i).value = ""));
+  ["j-code", "j-sha", "j-tag", "j-since", "j-until"].forEach((i) => ($(i).value = ""));
   $("j-status").value = ""; $("j-sort").value = "created:desc"; $("j-size").value = "25";
   resetPager(jstate); loadJobs();
 };
 $("j-sort").onchange = $("j-size").onchange = $("j-status").onchange =
   () => { resetPager(jstate); loadJobs(); };
-$("j-code").onkeydown = (e) => { if (e.key === "Enter") { resetPager(jstate); loadJobs(); } };
+["j-code", "j-sha", "j-tag", "j-since", "j-until"].forEach((i) =>
+  ($(i).onkeydown = (e) => { if (e.key === "Enter") { resetPager(jstate); loadJobs(); } }));
 wirePager(jstate, { prev: "j-prev", next: "j-next", first: "j-first" }, loadJobs);
 $("close").onclick = closeModal;
 $("modal").onclick = (e) => { if (e.target === $("modal")) closeModal(); };

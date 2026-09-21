@@ -228,16 +228,31 @@ def find_artifact(conn, sha: str, profile_hash: str):
         (sha, profile_hash)).fetchone()
 
 
-def insert_artifact(conn, row: dict, dets: List[dict]) -> int:
+def insert_artifact(conn, row: dict, dets: List[dict]) -> Optional[int]:
+    """Insert the artifact; return None when another worker already wrote the
+    same (source_sha, profile_hash) -- concurrent jobs for identical input
+    both reach the insert, and the loser must resolve to the winner's row
+    rather than dying on the unique constraint. The savepoint keeps the
+    caller's earlier writes (upsert_image, labels) valid on Postgres, where a
+    failed statement would otherwise abort the whole transaction."""
     thumb = row.pop("thumb", None)
-    aid = conn.execute(
-        """INSERT INTO artifacts (source_sha, profile_hash, profile_json, blob_path,
-             blob_sha, blob_size, mime, n_faces, n_plates, min_score, needs_review,
-             stats_json, created_at, expires_at)
-           VALUES (:source_sha,:profile_hash,:profile_json,:blob_path,:blob_sha,
-                   :blob_size,:mime,:n_faces,:n_plates,:min_score,:needs_review,
-                   :stats_json,:created_at,:expires_at)
-           RETURNING id""", row).fetchone()["id"]
+    conn.execute("SAVEPOINT sp_artifact")
+    try:
+        aid = conn.execute(
+            """INSERT INTO artifacts (source_sha, profile_hash, profile_json, blob_path,
+                 blob_sha, blob_size, mime, n_faces, n_plates, min_score, needs_review,
+                 stats_json, created_at, expires_at)
+               VALUES (:source_sha,:profile_hash,:profile_json,:blob_path,:blob_sha,
+                       :blob_size,:mime,:n_faces,:n_plates,:min_score,:needs_review,
+                       :stats_json,:created_at,:expires_at)
+               RETURNING id""", row).fetchone()["id"]
+    except Exception as exc:
+        conn.execute("ROLLBACK TO SAVEPOINT sp_artifact")
+        conn.execute("RELEASE sp_artifact")
+        if dialect().is_unique_violation(exc):
+            return None
+        raise
+    conn.execute("RELEASE sp_artifact")
     if thumb:
         conn.execute("INSERT INTO thumbs (artifact_id, jpeg) VALUES (?,?) "
                      "ON CONFLICT (artifact_id) DO UPDATE SET jpeg=excluded.jpeg",
@@ -640,10 +655,22 @@ def expired_blobs(conn, limit: int = 200) -> List[dict]:
         (now(), limit)).fetchall()
 
 
+def live_blob_bytes(conn) -> int:
+    """Bytes held by live blobs -- the `storage.max_bytes` usage counter.
+
+    blob_path is '' once expired or pruned, so this counts only bytes the
+    store actually still holds. Thumbnails stay outside the budget."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(blob_size),0) AS b FROM artifacts "
+        "WHERE blob_path != ''").fetchone()
+    return int(row["b"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
 def expire_artifact(conn, artifact_id: int) -> None:
-    """TTL passed: drop the blob reference and thumbnail; keep the record."""
+    """TTL passed: drop the blob reference; keep the record AND the thumbnail
+    -- the dashboard renders an expired card, not a hole, and a thumb is a
+    few KB against the blob it described."""
     conn.execute("UPDATE artifacts SET blob_path='' WHERE id=?", (artifact_id,))
-    conn.execute("DELETE FROM thumbs WHERE artifact_id=?", (artifact_id,))
 
 
 def artifact_blob_paths(conn, sha: str) -> List[str]:
@@ -838,7 +865,8 @@ JOB_SORTS = {"created": "created_at",
              "status": "status"}
 
 
-def query_jobs(conn, *, status=None, code=None, since=None, until=None, tenant=None,
+def query_jobs(conn, *, status=None, code=None, sha=None, tag=None,
+               since=None, until=None, tenant=None,
                sort="created", direction="desc", cursor=None,
                limit=50, offset=0) -> Dict[str, Any]:
     """Job listing, mirroring query_artifacts: capped count on the first page
@@ -851,6 +879,16 @@ def query_jobs(conn, *, status=None, code=None, since=None, until=None, tenant=N
             where.append("external_id LIKE ?"); params.append(str(code)[:-1] + "%")
         else:
             where.append("external_id=?"); params.append(code)
+    if sha:
+        # Prefix only -- idx_jobs_sha serves the range scan. A job's sha exists
+        # once it has been processed.
+        where.append("source_sha LIKE ?"); params.append(str(sha) + "%")
+    if tag:
+        # tags_json is the submission's own label snapshot, so this answers
+        # "the jobs of batch X" without joining the live labels tables. The
+        # LIKE scan is unindexed -- jobs churn slower than artifacts and the
+        # count is capped anyway.
+        where.append("tags_json LIKE ?"); params.append(f'%"{tag}"%')
     if since:
         where.append("created_at >= ?"); params.append(since)
     if until:
@@ -965,6 +1003,57 @@ def audit_list(conn, limit: int = 50) -> List[dict]:
                 "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (int(limit),))]
 
 
+AUDIT_RETENTION_DAYS = 30
+
+
+def audit_prune(conn, days: int = AUDIT_RETENTION_DAYS) -> int:
+    """Bound the event log. Audit rows are also how rate-limit hits surface in
+    the dashboard, so without retention a long-lived instance grows the home
+    on pure traffic."""
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(days=days)).isoformat(timespec="seconds")
+    cur = conn.execute("DELETE FROM audit WHERE at < ?", (cutoff,))
+    return cur.rowcount
+
+
+# --- public read rules ---------------------------------------------------------
+
+def public_rule_add(conn, rule_id: str, name: str, tenant: str = None,
+                    tag: str = None, meta_key: str = None,
+                    meta_value: str = None) -> dict:
+    conn.execute(
+        """INSERT INTO public_rules (id, name, tenant, tag, meta_key,
+             meta_value, created_at) VALUES (?,?,?,?,?,?,?)""",
+        (rule_id, name, tenant, tag, meta_key, meta_value, now()))
+    return {"id": rule_id, "name": name, "tenant": tenant, "tag": tag,
+            "meta_key": meta_key, "meta_value": meta_value}
+
+
+def public_rule_del(conn, rule_id: str) -> bool:
+    return conn.execute(
+        "DELETE FROM public_rules WHERE id=?", (rule_id,)).rowcount > 0
+
+
+def public_rules(conn) -> List[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM public_rules ORDER BY created_at")]
+
+
+def image_is_public(conn, sha: str) -> bool:
+    """Does any declared rule match this image's labels? Evaluated on every
+    public fetch so revoking the rule takes effect on the next request."""
+    return conn.execute(
+        """SELECT 1 FROM public_rules r WHERE
+           (r.tag IS NOT NULL AND EXISTS(
+              SELECT 1 FROM tags t WHERE t.source_sha=? AND t.tag=r.tag
+                AND (r.tenant IS NULL OR t.tenant=r.tenant)))
+           OR (r.meta_key IS NOT NULL AND EXISTS(
+              SELECT 1 FROM metadata m WHERE m.source_sha=?
+                AND m.key=r.meta_key AND m.value=r.meta_value
+                AND (r.tenant IS NULL OR m.tenant=r.tenant)))
+           LIMIT 1""", (sha, sha)).fetchone() is not None
+
+
 def _code_tenant(scope):
     return None if scope is None or scope.is_global else scope.tenant
 
@@ -1002,6 +1091,8 @@ def _stats_uncached(conn, scope=None) -> Dict[str, Any]:
                       COALESCE(SUM(n_faces),0) faces,
                       COALESCE(SUM(n_plates),0) plates,
                       COALESCE(SUM(blob_size),0) bytes_stored,
+                      COALESCE(SUM(CASE WHEN blob_path != ''
+                                   THEN blob_size ELSE 0 END),0) bytes_live,
                       COALESCE(SUM(needs_review),0) needs_review
                FROM artifacts""").fetchone()
         return {
@@ -1011,6 +1102,7 @@ def _stats_uncached(conn, scope=None) -> Dict[str, Any]:
             "faces": row["faces"], "plates": row["plates"],
             "needs_review": row["needs_review"],
             "bytes_stored": row["bytes_stored"],
+            "bytes_live": row["bytes_live"],
             "codes": conn.execute("SELECT COUNT(*) c FROM external_ids").fetchone()["c"],
             "jobs": {r["status"]: r["n"] for r in conn.execute(
                 "SELECT status, COUNT(*) n FROM jobs GROUP BY status")},

@@ -222,3 +222,45 @@ always available, creation is off by default behind a second secret.
 
 Async jobs, unique codes as a primary key, and a sidecar standing in for the
 producer and consumer applications.
+
+## Unreleased
+
+**Public blob rules + rate limiting.** The dashboard gains a `public` tab where
+an admin declares read rules -- one tag, or one metadata `k=v`, optionally
+bound to a tenant. `GET /pub/blobs/<sha>` then serves matching redacted images
+with no API key; the URL is sha-addressed only (codes are enumerable, a sha256
+is not) and rules are evaluated per request so deletion revokes immediately.
+All endpoints are now rate-limited per IP: 60/min on `/pub/*`, 300/min
+elsewhere, 429 `rate_limited` with `retry_after` on excess. Blocked bursts
+flush to the audit log as one grouped row per window, surfaced in the public
+tab and the audit trail. Audit rows are pruned past 30 days so a long-lived
+instance does not grow its home on traffic alone.
+
+**Dedup race fixed.** Two workers processing the same
+`(source_sha, profile_hash)` both reached the artifact insert, and the loser
+died on the unique constraint (seen as `internal_error` jobs in a 1k-image
+real-data batch). `insert_artifact` now returns None on the conflict -- the
+SQL path wraps the insert in a SAVEPOINT so Postgres keeps the transaction
+valid -- and the pipeline resolves to the winner's row as a cache hit. Two
+more of the same shape fixed alongside: the local store's `.part` temp file
+was shared between racing writers (second rename failed ENOENT; the name is
+now per-writer), and Mongo's `(source_sha, profile_hash)` index was not
+unique, so it enforced nothing -- `init` now upgrades it in place.
+
+**Blob storage cap.** `storage.max_bytes` (default 0 = unlimited,
+`BLURD_STORAGE_MAX_BYTES`) bounds the bytes held by live redacted blobs --
+counted from `artifacts.blob_size`, so it works identically on local and s3
+storage. When a write would exceed the cap, overdue TTL blobs are reclaimed
+first; if it still does not fit the job fails with 507 `storage_full`
+(recoverable, `retry_after`). Thumbnails and metadata stay outside the
+budget. `/v1/stats` gains `bytes_live` and `storage_max_bytes` on the
+unrestricted view. For demo boxes and shared VMs where disk exhaustion is
+the failure to prevent.
+
+**Job listing gains `sha` + `tag` filters.** `GET /v1/jobs` (and the jobs
+dashboard tab) now filter by `sha` -- a `source_sha` prefix served by
+`idx_jobs_sha` -- and by `tag`, a quoted-substring match on the job's
+`tags_json` submission snapshot. The tag filter answers "the jobs of batch X"
+without joining the live labels tables; it is intentionally a snapshot, not
+live labels. Both are additive parameters, identical across sqlite/pg/mongo,
+and the jobs tab resets keyset pagination when they change.

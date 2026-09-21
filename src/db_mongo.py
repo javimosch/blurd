@@ -18,7 +18,7 @@ So the document model is denormalised the way Mongo wants:
     codes          canonical external ids, `_id` = tenant + the code, so the
                    uniqueness the API promises is enforced by the primary key
                    exactly as it is in SQL.
-    thumbs, api_keys, jobs, instances, audit, counters
+    thumbs, api_keys, jobs, instances, audit, counters, public_rules
 
 `labels` and `codes` are canonical and `artifacts.lbl` is a cache of them. The
 price is write amplification: changing a tag rewrites that image's artifacts.
@@ -72,8 +72,15 @@ def init(conn) -> None:
     # index-backed becomes a blocking in-memory sort at scale.
     for field in sorted(set(_SORT_FIELD.values())):
         arts.create_index([(field, pymongo.DESCENDING), ("_id", pymongo.DESCENDING)])
+    # The dedup contract (source_sha, profile_hash) must be unique, matching
+    # the SQL UNIQUE constraint. Existing deployments carry a non-unique
+    # index on the same keys, which create_index(unique=True) refuses to
+    # upgrade in place -- drop and rebuild it.
+    existing = arts.index_information().get("source_sha_1_profile_hash_1")
+    if existing and not existing.get("unique"):
+        arts.drop_index("source_sha_1_profile_hash_1")
     arts.create_index([("source_sha", pymongo.ASCENDING),
-                       ("profile_hash", pymongo.ASCENDING)])
+                       ("profile_hash", pymongo.ASCENDING)], unique=True)
     arts.create_index([("source_sha", pymongo.ASCENDING),
                        ("created_at", pymongo.DESCENDING)])
     arts.create_index([("profile_hash", pymongo.ASCENDING)])
@@ -363,7 +370,9 @@ def find_artifact(conn, sha: str, profile_hash: str):
         {"source_sha": sha, "profile_hash": profile_hash}, _NO_HEAVY), "id")
 
 
-def insert_artifact(conn, row: dict, dets: List[dict]) -> int:
+def insert_artifact(conn, row: dict, dets: List[dict]) -> Optional[int]:
+    """Insert the artifact; return None when another worker already wrote the
+    same (source_sha, profile_hash) -- see db_sql.insert_artifact."""
     thumb = row.pop("thumb", None)
     aid = _next_id(conn, "artifacts")
     doc = dict(row)
@@ -374,7 +383,12 @@ def insert_artifact(conn, row: dict, dets: List[dict]) -> int:
          "detector": d["detector"]} for d in dets]
     doc["img"] = _image_projection(conn, row["source_sha"])
     doc["lbl"] = []
-    conn.db["artifacts"].insert_one(doc)
+    try:
+        conn.db["artifacts"].insert_one(doc)
+    except Exception as exc:
+        if type(exc).__name__ == "DuplicateKeyError":
+            return None
+        raise
     if thumb:
         from bson.binary import Binary
         conn.db["thumbs"].update_one({"_id": aid},
@@ -429,11 +443,19 @@ def expired_blobs(conn, limit: int = 200) -> List[dict]:
     return [{"id": d["_id"], "blob_path": d["blob_path"]} for d in cur]
 
 
+def live_blob_bytes(conn) -> int:
+    """Bytes held by live blobs -- see db_sql.live_blob_bytes."""
+    agg = list(conn.db["artifacts"].aggregate([
+        {"$match": {"blob_path": {"$ne": ""}}},
+        {"$group": {"_id": None, "b": {"$sum": "$blob_size"}}}]))
+    return int(agg[0]["b"]) if agg else 0
+
+
 def expire_artifact(conn, artifact_id: int) -> None:
-    """TTL passed: drop the blob reference and thumbnail; keep the record."""
+    """TTL passed: drop the blob reference; keep the record AND the thumbnail
+    -- see db_sql.expire_artifact."""
     conn.db["artifacts"].update_one({"_id": int(artifact_id)},
                                     {"$set": {"blob_path": ""}})
-    conn.db["thumbs"].delete_one({"_id": int(artifact_id)})
 
 
 def has_legacy_thumb_column(conn) -> bool:
@@ -843,7 +865,8 @@ def job_status_counts(conn, tenant: str = None) -> Dict[str, int]:
     return {d["_id"]: d["n"] for d in conn.db["jobs"].aggregate(pipeline)}
 
 
-def query_jobs(conn, *, status=None, code=None, since=None, until=None, tenant=None,
+def query_jobs(conn, *, status=None, code=None, sha=None, tag=None,
+               since=None, until=None, tenant=None,
                sort="created", direction="desc", cursor=None,
                limit=50, offset=0) -> Dict[str, Any]:
     q: Dict[str, Any] = {}
@@ -852,6 +875,12 @@ def query_jobs(conn, *, status=None, code=None, since=None, until=None, tenant=N
     if code:
         q["external_id"] = ({"$regex": "^" + _escape(str(code)[:-1])}
                             if str(code).endswith("*") else code)
+    if sha:
+        q["source_sha"] = {"$regex": "^" + _escape(str(sha))}
+    if tag:
+        # Same snapshot-LIKE semantics as the SQL backend -- see
+        # db_sql.query_jobs.
+        q["tags_json"] = {"$regex": '"' + _escape(str(tag)) + '"'}
     if since or until:
         rng: Dict[str, Any] = {}
         if since:
@@ -952,6 +981,56 @@ def audit_list(conn, limit: int = 50) -> List[dict]:
             for d in conn.db["audit"].find({}).sort([("seq", -1)]).limit(int(limit))]
 
 
+AUDIT_RETENTION_DAYS = 30
+
+
+def audit_prune(conn, days: int = AUDIT_RETENTION_DAYS) -> int:
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(days=days)).isoformat(timespec="seconds")
+    return conn.db["audit"].delete_many({"at": {"$lt": cutoff}}).deleted_count
+
+
+# --- public read rules ---------------------------------------------------------
+
+def public_rule_add(conn, rule_id: str, name: str, tenant: str = None,
+                    tag: str = None, meta_key: str = None,
+                    meta_value: str = None) -> dict:
+    conn.db["public_rules"].insert_one(
+        {"_id": rule_id, "name": name, "tenant": tenant, "tag": tag,
+         "meta_key": meta_key, "meta_value": meta_value,
+         "created_at": now()})
+    return {"id": rule_id, "name": name, "tenant": tenant, "tag": tag,
+            "meta_key": meta_key, "meta_value": meta_value}
+
+
+def public_rule_del(conn, rule_id: str) -> bool:
+    return conn.db["public_rules"].delete_one({"_id": rule_id}).deleted_count > 0
+
+
+def public_rules(conn) -> List[dict]:
+    return [_row(d) for d in conn.db["public_rules"].find({}).sort(
+        [("created_at", 1)])]
+
+
+def image_is_public(conn, sha: str) -> bool:
+    """See db_sql.image_is_public: read-time evaluation so deleting a rule
+    revokes on the next request."""
+    for r in conn.db["public_rules"].find({}):
+        tq: Dict[str, Any] = {"source_sha": sha}
+        if r.get("tenant"):
+            tq["tenant"] = r["tenant"]
+        if r.get("tag"):
+            q = dict(tq); q["tags"] = r["tag"]
+            if conn.db["labels"].find_one(q):
+                return True
+        if r.get("meta_key"):
+            q = dict(tq); q[f"meta.{r['meta_key']}"] = r.get("meta_value")
+            if conn.db["labels"].find_one(q):
+                return True
+    return False
+
+
 # --- stats --------------------------------------------------------------------
 
 _STATS_CACHE: Dict[str, Any] = {}
@@ -979,6 +1058,8 @@ def _stats_uncached(conn, scope=None) -> Dict[str, Any]:
         "_id": None, "artifacts": {"$sum": 1},
         "faces": {"$sum": "$n_faces"}, "plates": {"$sum": "$n_plates"},
         "bytes_stored": {"$sum": "$blob_size"},
+        "bytes_live": {"$sum": {"$cond": [{"$ne": ["$blob_path", ""]},
+                                        "$blob_size", 0]}},
         "needs_review": {"$sum": "$needs_review"}}
     if not unrestricted:
         # Only the scoped view needs distinct images; the unrestricted one has
@@ -995,7 +1076,7 @@ def _stats_uncached(conn, scope=None) -> Dict[str, Any]:
     if unrestricted:
         return {"scope": "unrestricted",
                 "images": db["images"].estimated_document_count(),
-                **totals,
+                **totals, "bytes_live": row.get("bytes_live", 0),
                 "codes": db["codes"].estimated_document_count(),
                 "jobs": job_status_counts(conn),
                 "tags": _top_tags(conn, None)}

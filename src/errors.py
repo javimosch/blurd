@@ -22,8 +22,13 @@ EXIT_AUTH_FAILED = 107
 # opposite of what a queue shedding load wants. 503 + Retry-After is the signal
 # every balancer and client library already understands.
 EXIT_OVERLOADED = 108
-# 110-119 internal - report a bug
+# Per-IP rate limiting: unlike `overloaded` this is about the CALLER, not the
+# queue -- so 429, which is the status every client already maps it to.
+EXIT_RATE_LIMITED = 109
+# 110 internal - report a bug
 EXIT_INTERNAL_ERROR = 110
+# 111+ capacity - the instance is full, not the caller's queue slice
+EXIT_STORAGE_FULL = 111
 
 # Exit code -> HTTP status, so the CLI and the API agree on what went wrong.
 HTTP_FOR_EXIT = {
@@ -37,7 +42,9 @@ HTTP_FOR_EXIT = {
     EXIT_API_UNAVAILABLE: 502,
     EXIT_AUTH_FAILED: 401,
     EXIT_OVERLOADED: 503,
+    EXIT_RATE_LIMITED: 429,
     EXIT_INTERNAL_ERROR: 500,
+    EXIT_STORAGE_FULL: 507,
 }
 
 
@@ -162,6 +169,34 @@ class Overloaded(BlurdError):
             suggestions=[f"Retry after {retry_after}s with backoff",
                          "Sustained backpressure means the instance is at "
                          "capacity: add a replica, or slow the producer"],
+        )
+
+
+class StorageFull(BlurdError):
+    """The blob store is at its configured `storage.max_bytes` cap.
+
+    Recoverable: expired blobs are pruned before this is raised, so a retry
+    succeeds once the TTL sweep or an admin frees space. Distinct from
+    `overloaded` -- queue pressure is transient, a full disk is not.
+    """
+    def __init__(self, message="Blob storage cap reached", details=None,
+                 retry_after=60):
+        super().__init__(
+            EXIT_STORAGE_FULL, "storage_full", message, details,
+            recoverable=True, retry_after=retry_after,
+            suggestions=[f"Retry after {retry_after}s -- TTL expiry may free "
+                         "space", "Raise `storage.max_bytes` or free disk"],
+        )
+
+
+class RateLimited(BlurdError):
+    """Too many requests from this address in the current window."""
+    def __init__(self, message="Rate limit exceeded", details=None, retry_after=60):
+        super().__init__(
+            EXIT_RATE_LIMITED, "rate_limited", message, details,
+            recoverable=True, retry_after=retry_after,
+            suggestions=[f"Retry after {retry_after}s",
+                         "Spread requests out or use a cached URL"],
         )
 
 

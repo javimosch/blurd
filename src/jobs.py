@@ -100,6 +100,10 @@ class JobQueue:
             try:
                 self.reap()
                 self.prune_expired()
+                self.prune_audit()
+                cb = getattr(self, "on_sweep", None)
+                if cb:
+                    cb()      # the server hangs its rate-event flush here
             except Exception:
                 pass          # a failed sweep must never take the process down
 
@@ -145,8 +149,18 @@ class JobQueue:
             db.expire_artifact(conn, r["id"])
         if rows:
             conn.commit()
-        conn.close()
+        # No conn.close(): connect() hands out the thread's cached connection;
+        # closing it poisons every later query on this thread.
         return len(rows)
+
+    def prune_audit(self, days: int = 30) -> int:
+        """Retention for the audit/event log so a long-lived instance does not
+        grow its home on traffic alone. 30 days by default."""
+        conn = db.connect(self.cfg.db_file)
+        n = db.audit_prune(conn, days)
+        if n:
+            conn.commit()
+        return n
 
     def reap(self) -> dict:
         """Reclaim jobs whose owner is no longer alive.

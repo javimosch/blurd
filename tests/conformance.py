@@ -408,6 +408,99 @@ def main():
         check("dashboard credentials do NOT authenticate the v1 API",
               s == 401, f"got {s}")
 
+        print("\n-- public blob rules (admin-gated, sha-addressed, rate-limited)")
+        # A fresh submission with a unique tag, so the rule matches exactly
+        # one image and nothing earlier in the run leaks into it.
+        pub_tag = f"conf-pub-{time.time_ns()}"
+        # Unique bytes, not `raw`: this must be a sha that ONLY this rule can
+        # match -- `raw`'s sha is already bound to `code` earlier in the run.
+        praw = _mark_bytes(raw, pub_tag)
+        s, b, _ = http(f"{a.url}/v1/images?wait=60&tags={pub_tag}", "POST",
+                       a.api_key, praw, "image/jpeg")
+        psha = json.loads(b).get("data", {}).get("source_sha", "")
+        check("public-tag submission completes", s == 200 and len(psha) == 64,
+              f"got {s}")
+
+        s, _, _ = http_raw(f"{a.url}/pub/blobs/{psha}", headers={})
+        check("no public access before any rule", s == 404, f"got {s}")
+
+        s, b, _ = http_raw(f"{a.url}/ui-api/public-rules", method="POST",
+                           headers=authed,
+                           body=json.dumps(
+                               {"name": "conf-pub", "tag": pub_tag}).encode())
+        check("admin can create a public rule", s == 200, f"got {s}")
+        rid = json.loads(b).get("data", {}).get("id", "")
+
+        s, b, h = http_raw(f"{a.url}/pub/blobs/{psha}", headers={})
+        check("rule grants unauthenticated blob access", s == 200, f"got {s}")
+        check("public blob is an image",
+              b[:3] == b"\xff\xd8\xff" or b[:4] == b"\x89PNG" or b[:4] == b"RIFF",
+              f"magic {b[:4]!r}")
+        # by-code is deliberately not public: codes are enumerable, sha is not.
+        s, _, _ = http_raw(f"{a.url}/pub/blobs/by-code/x", headers={})
+        check("public access is sha-addressed only", s == 404, f"got {s}")
+        s, _, _ = http_raw(f"{a.url}/pub/blobs/{sha}", headers={})
+        check("images outside the rule stay private", s == 404, f"got {s}")
+
+        s, _, _ = http_raw(f"{a.url}/ui-api/public-rules/{rid}",
+                           method="DELETE", headers=authed)
+        check("admin can delete the rule", s == 200, f"got {s}")
+        s, _, _ = http_raw(f"{a.url}/pub/blobs/{psha}", headers={})
+        check("deleting the rule revokes access immediately", s == 404,
+              f"got {s}")
+
+        # The public bucket is 60/min: 70 cheap 404s must trip it.
+        codes = [http_raw(f"{a.url}/pub/blobs/{psha}", headers={})[0]
+                 for _ in range(70)]
+        check("public endpoint rate-limits at 60/min",
+              429 in codes and codes[-1] == 429, f"last {codes[-5:]}")
+        _, b, _ = http_raw(f"{a.url}/pub/blobs/{psha}", headers={})
+        err = json.loads(b).get("error", {})
+        check("429 is typed rate_limited", err.get("type") == "rate_limited",
+              err.get("type"))
+
+        # Blocked hits flush as one grouped audit row when the window closes;
+        # the next request in the new window triggers the flush.
+        time.sleep(62 - (time.time() % 60))
+        http_raw(f"{a.url}/pub/blobs/{psha}", headers={})
+        s, b, _ = http_raw(f"{a.url}/ui-api/audit?limit=50",
+                           headers={"Authorization": basic})
+        evs = [r for r in json.loads(b).get("data", [])
+               if r.get("action") == "rate_limited"]
+        check("rate-limit burst surfaces as a grouped audit event",
+              bool(evs) and evs[0].get("detail", {}).get("blocked", 0) >= 5,
+              f"{len(evs)} events")
+
+    print("\n-- concurrent dedup race")
+    # Two workers processing the same (source_sha, profile_hash) must both end
+    # `done` -- the loser resolves to the winner's artifact, not a 500 on the
+    # unique constraint or a shared .part rename.
+    import threading as _th
+    race_profile = urllib.parse.quote(json.dumps(
+        {"storage": {"ttl": 3600 + (time.time_ns() % 1000)}}))
+    race_ids = []
+    def _submit(i):
+        s, b, _ = http(f"{a.url}/v1/images?profile={race_profile}",
+                       "POST", a.api_key, raw, "image/jpeg")
+        race_ids.append(json.loads(b)["data"]["job_id"]
+                        if s in (200, 202) else None)
+    ths = [_th.Thread(target=_submit, args=(i,)) for i in range(6)]
+    for t in ths: t.start()
+    for t in ths: t.join()
+    statuses = []
+    for jid in race_ids:
+        if not jid:
+            continue
+        for _ in range(30):
+            s, b, _ = http(f"{a.url}/v1/jobs/{jid}", key=a.api_key)
+            st = json.loads(b)["data"]["status"]
+            if st in ("done", "failed"):
+                statuses.append(st); break
+            time.sleep(0.5)
+    check("6 concurrent submits of one image all finish done",
+          len(statuses) == 6 and all(s == "done" for s in statuses),
+          f"{statuses}")
+
     print("\n-- key export/import (hashes are portable, plaintext is not)")
     # The same key must work on a second instance without ever being re-shown:
     # export carries key_sha + scope, import registers them.
@@ -571,6 +664,17 @@ def main():
     s, b, _ = http(f"{a.url}/v1/jobs?limit=5&status=done", key=a.api_key)
     check("jobs filter by status",
           all(j["status"] == "done" for j in json.loads(b)["data"]["items"]))
+    s, b, _ = http(f"{a.url}/v1/jobs?tag=conformance&limit=50", key=a.api_key)
+    jt = json.loads(b)["data"]["items"]
+    check("jobs filter by submission tag",
+          jt and all(j["job_id"] != "" for j in jt)
+          and any(j.get("external_id") == code for j in jt),
+          f"{len(jt)} jobs tagged conformance")
+    s, b, _ = http(f"{a.url}/v1/jobs?sha={sha[:12]}&limit=50", key=a.api_key)
+    js = json.loads(b)["data"]["items"]
+    check("jobs filter by source sha prefix",
+          js and all(j["source_sha"].startswith(sha[:12]) for j in js),
+          f"{len(js)} jobs")
     if jd.get("next_cursor"):
         s, b, _ = http(f"{a.url}/v1/jobs?limit=5&sort=duration&direction=desc"
                        f"&cursor={urllib.parse.quote(jd['next_cursor'])}", key=a.api_key)

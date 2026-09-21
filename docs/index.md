@@ -50,7 +50,7 @@ consumer lookup ~13 µs where a metadata filter is ~7 ms.
 | memory | 120 MB + 90 MB per worker, sized automatically from the cgroup |
 | stored per image | ~333 kB blob + ~19 kB metadata |
 | consumer lookup by your own code | ~13 µs |
-| conformance | 113 black-box checks, on every backend |
+| conformance | 152 black-box checks, on every backend |
 
 ## Choices it gives you
 

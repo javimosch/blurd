@@ -79,6 +79,10 @@ services:
       BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD:-blurd-demo}
       BLURD_DASHBOARD_KEY_SECRET: ${BLURD_DASHBOARD_KEY_SECRET:-${BLURD_DASHBOARD_PASSWORD:-blurd-demo}}
       BLURD_DRAIN_SECONDS: ${BLURD_DRAIN_SECONDS:-20}
+      # Hard cap on live redacted blobs; 0 = unlimited. Set ~1 GB on demo VMs
+      # so a test run can never exhaust the disk (writes then fail 507
+      # `storage_full` after reclaiming expired TTL blobs).
+      BLURD_STORAGE_MAX_BYTES: ${BLURD_STORAGE_MAX_BYTES:-0}
       # Optional: BLURD_FETCH_MAX_BYTES, BLURD_QUEUE_MAX, BLURD_WORKERS
     ports: ["8770:8770"]
     volumes: ["blurd-home:/var/lib/blurd"]

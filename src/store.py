@@ -27,10 +27,12 @@ import datetime
 import hashlib
 import hmac
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from uuid import uuid4
 from typing import Optional
 
 from .errors import Internal, NotFound, Upstream, ValidationError
@@ -72,7 +74,11 @@ class LocalStore:
     def put(self, rel: str, data: bytes, content_type: str = "image/jpeg") -> None:
         dest = self.root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".part")
+        # Unique temp name per writer: concurrent jobs racing the same
+        # (source_sha, profile_hash) share `dest`, and a shared .part name
+        # made the second rename fail ENOENT after the first moved it.
+        tmp = dest.with_suffix(
+            f"{dest.suffix}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.part")
         tmp.write_bytes(data)
         tmp.replace(dest)      # atomic: readers never see a half-written blob
 
