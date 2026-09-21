@@ -1,4 +1,4 @@
-# blurd
+# blurd <img src="docs/assets/logo.png" align="right" width="96" alt="blurd logo">
 
 Redact faces and licence plates from images, for service-to-service use.
 One CLI that runs the pipeline locally, hosts a REST API + dashboard as a
@@ -9,7 +9,7 @@ is reduced to a sha256 that links the artifact back to its origin and prevents
 reprocessing the same bytes twice.
 
 > **Status: proof of concept.** Everything described here is built, running and
-> covered by 152 black-box conformance checks, and every performance number is
+> covered by 154 black-box conformance checks, and every performance number is
 > measured rather than estimated. It has not been run in production.
 
 ---
@@ -99,6 +99,11 @@ prints every URL and credential. Open the sidecar and you get:
 The sidecar holds the API key server-side; the browser never sees it and never
 talks to blurd directly, mirroring the real topology
 (`frontend → backend → blurd`).
+
+![blurd dashboard — stats, filters, facet chips and redacted thumbnails](docs/assets/dashboard.png)
+
+*The dashboard: live counters, filter facets, and a grid of redacted
+thumbnails — original images never exist on disk.*
 
 ## Quick start (CLI)
 

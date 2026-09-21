@@ -6,6 +6,8 @@ nav_order: 1
 
 # blurd
 
+<img src="assets/logo.png" alt="blurd logo" width="120" style="float:right;margin:0 0 1rem 1rem">
+
 Face and licence-plate redaction for image pipelines. **The original is never
 stored** — only its SHA-256, its dimensions, and the redacted output.
 
@@ -50,7 +52,7 @@ consumer lookup ~13 µs where a metadata filter is ~7 ms.
 | memory | 120 MB + 90 MB per worker, sized automatically from the cgroup |
 | stored per image | ~333 kB blob + ~19 kB metadata |
 | consumer lookup by your own code | ~13 µs |
-| conformance | 152 black-box checks, on every backend |
+| conformance | 154 black-box checks, on every backend |
 
 ## Choices it gives you
 
@@ -61,7 +63,7 @@ consumer lookup ~13 µs where a metadata filter is ~7 ms.
 | scale | one instance · N replicas behind a load balancer |
 | deploy | CLI · Docker · Docker Compose · Kubernetes (Helm) |
 
-Every combination passes the same 113 checks. Which to pick, and why, is in the
+Every combination passes the same 154 checks. Which to pick, and why, is in the
 [deployment guide](deployment.html).
 
 ## Multi-tenant by construction
@@ -76,6 +78,8 @@ the resource exists.
 blurd keys add app-acme  --scope-tag acme
 blurd keys add app-fleet --scope-meta appId=fleet
 ```
+
+![blurd dashboard — stats, filters, facet chips and redacted thumbnails](assets/dashboard.png)
 
 ## Try it
 
