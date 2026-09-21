@@ -42,7 +42,10 @@ DEFAULTS = {
     "dashboard_key_secret": None,
     "fetch": {
         "timeout_s": 15,
-        "max_bytes": 25 * 1024 * 1024,
+        # Applies to every image input -- url fetch, file read and raw upload.
+        # 5 MB is ~3.5x the largest file seen in a 12-month production sample
+        # (max 1.43 MB, p99 633 KB); a browser posting more than that is a gap.
+        "max_bytes": 5 * 1024 * 1024,
         "max_pixels": 50_000_000,      # decompression-bomb guard
         "allow_private_ips": False,    # SSRF guard; opt-in for local testing
         "max_redirects": 3,
@@ -187,6 +190,7 @@ ENV_OVERRIDES = {
     "BLURD_QUEUE_MAX_BYTES": ("queue_max_bytes", str),
     "BLURD_ORT_ARENA": ("ort_arena", str),
     "BLURD_DRAIN_SECONDS": ("drain_seconds", int),
+    "BLURD_FETCH_MAX_BYTES": ("fetch.max_bytes", int),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),

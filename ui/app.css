@@ -108,3 +108,10 @@ pre{background:#0b0d10;border:1px solid var(--line);border-radius:var(--radius);
   padding:10px;overflow:auto;font-size:11px;margin:0}
 @media (max-width:820px){.modal-body{grid-template-columns:1fr}
   .modal-meta{border-left:0;border-top:1px solid var(--line)}}
+.chips{flex-basis:100%;display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:#0b0d10;border:1px solid var(--line);border-radius:12px;
+  padding:2px 10px;font:11px/1.5 inherit;color:var(--dim);cursor:pointer}
+.chip:hover{border-color:var(--accent);color:var(--ink)}
+.chip.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.pill.tag{cursor:pointer}
+.pill.tag:hover{border-color:var(--accent);color:var(--accent)}

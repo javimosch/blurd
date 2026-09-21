@@ -83,7 +83,8 @@ function renderPager(p, ids) {
 function card(item) {
   const el = document.createElement("div");
   el.className = "card" + (item.needs_review ? " review" : "");
-  const tags = item.tags.map((t) => `<span class="pill">${esc(t)}</span>`).join("");
+  const tags = item.tags.map((t) =>
+    `<span class="pill tag" data-tag="${esc(t)}">${esc(t)}</span>`).join("");
   el.innerHTML = `
     <img loading="lazy" src="/ui-api/thumbs/${item.source_sha}?profile=${item.profile_hash}" alt="">
     <div class="info">
@@ -98,6 +99,13 @@ function card(item) {
       <div>${tags}</div>
     </div>`;
   el.onclick = () => openDetail(item.source_sha, item.profile_hash);
+  el.querySelectorAll(".pill.tag").forEach((p) => {
+    p.onclick = (e) => {
+      e.stopPropagation();
+      csvToggle("f-tag", p.dataset.tag);
+      resetPager(state); load();
+    };
+  });
   return el;
 }
 
@@ -122,9 +130,52 @@ async function load() {
     data.items.forEach((i) => grid.appendChild(card(i)));
     $("empty").hidden = data.items.length !== 0;
     renderPager(state, { info: "page-info", prev: "prev", next: "next", first: "first" });
+    loadFacets();
   } catch (err) {
     grid.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
   }
+}
+
+/* Clickable filter chips built from what is actually stored. Clicking a chip
+   toggles the term in the matching input and re-runs the filter, so chips and
+   the text boxes can never disagree about what is active. */
+function csvHas(input, term) {
+  return csv($(input).value).includes(term);
+}
+function csvToggle(input, term) {
+  const items = csv($(input).value);
+  const i = items.indexOf(term);
+  if (i >= 0) items.splice(i, 1); else items.push(term);
+  $(input).value = items.join(",");
+}
+
+function chip(label, active, onclick, title) {
+  const b = document.createElement("button");
+  b.className = "chip" + (active ? " active" : "");
+  b.textContent = label;
+  if (title) b.title = title;
+  b.onclick = onclick;
+  return b;
+}
+
+async function loadFacets() {
+  try {
+    const f = await api("/facets");
+    const box = $("chips");
+    box.innerHTML = "";
+    const apply = () => { resetPager(state); load(); };
+    (f.tags || []).forEach((t) => box.appendChild(chip(
+      `${t.tag} (${t.n})`, csvHas("f-tag", t.tag),
+      () => { csvToggle("f-tag", t.tag); apply(); },
+      "filter by tag")));
+    Object.entries(f.meta || {}).forEach(([k, vals]) => vals.forEach((v) => {
+      const term = `${k}=${v.value}`;
+      box.appendChild(chip(
+        `${term} (${v.n})`, csvHas("f-meta", term),
+        () => { csvToggle("f-meta", term); apply(); },
+        "filter by metadata"));
+    }));
+  } catch (_) { /* chips are a convenience, not a requirement */ }
 }
 
 async function loadStats() {
@@ -422,4 +473,4 @@ document.onkeydown = (e) => { if (e.key === "Escape") closeModal(); };
 ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) =>
   ($(i).onkeydown = (e) => { if (e.key === "Enter") { resetPager(state); load(); } }));
 
-load(); loadStats();
+load(); loadStats(); loadFacets();

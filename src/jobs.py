@@ -27,7 +27,7 @@ from .scope import Scope
 from .canonical import canonical_json
 from .config import Config
 from .errors import (BlurdError, Conflict, Internal, NotFound, Overloaded,
-                     Upstream)
+                     Upstream, ValidationError)
 
 QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
 ON_CONFLICT = ("reuse", "replace", "reject")
@@ -227,6 +227,22 @@ class JobQueue:
             from . import fetch
             data, _ = fetch.read_file(path, self.cfg.get("fetch", {}))
             kind = "stream"
+        if data is not None:
+            max_bytes = int(self.cfg.get("fetch", {}).get(
+                "max_bytes", 5 * 1024 * 1024))
+            if len(data) > max_bytes:
+                raise ValidationError(
+                    f"Image too large: {len(data)} bytes > limit {max_bytes}",
+                    {"max_bytes": max_bytes})
+            # Magic bytes, not the Content-Type header. A body that sniffs to
+            # octet-stream can never decode, so it fails now with a 422 instead
+            # of queueing and dying in the worker where only a poll reveals it.
+            from . import fetch
+            if fetch.sniff_mime(data) == "application/octet-stream":
+                raise ValidationError(
+                    "Not an image: unrecognised magic bytes",
+                    {"bytes": len(data)},
+                    ["Supported: jpeg, png, webp, bmp, tiff"])
 
         job_id = new_id()
         db.insert_job(conn, {
@@ -316,7 +332,7 @@ class JobQueue:
         job_id = new_id()
         db.merge_tags(conn, sha, tags or [], tenant)
         db.merge_metadata(conn, sha, metadata or {}, tenant)
-        db.touch_code(conn, tenant, external_id)
+        db.touch_code(conn, tenant, external_id, phash)
         ts = db.now()
         db.insert_job(conn, {
             "id": job_id, "status": DONE, "external_id": external_id,
@@ -397,7 +413,7 @@ class JobQueue:
             sha = res["source_sha"]
             if row["external_id"]:
                 bind_code(conn, row["external_id"], sha, row["on_conflict"],
-                          row["tenant"] or "global")
+                          row["tenant"] or "global", row["profile_hash"])
             artifact = db.find_artifact(conn, sha, row["profile_hash"])
             db.mark_job_done(conn, job_id, DONE, sha, artifact["id"], res["cached"],
                              round((time.perf_counter() - started) * 1000, 2))
@@ -464,11 +480,11 @@ class JobQueue:
 # -- external id -------------------------------------------------------------
 
 def bind_code(conn, external_id: str, sha: str, on_conflict: str,
-              tenant: str = "global") -> None:
+              tenant: str = "global", profile_hash: str = None) -> None:
     row = db.find_code(conn, tenant, external_id)
     if row is None:
         try:
-            db.insert_code(conn, tenant, external_id, sha)
+            db.insert_code(conn, tenant, external_id, sha, profile_hash)
             return
         except Exception as exc:
             # Two replicas can both find nothing and both insert. The unique
@@ -481,12 +497,12 @@ def bind_code(conn, external_id: str, sha: str, on_conflict: str,
             if row is None:
                 raise
     if row["source_sha"] == sha:
-        db.touch_code(conn, tenant, external_id)
+        db.touch_code(conn, tenant, external_id, profile_hash)
         return
     # Same code, different bytes. Silently repointing would make a consumer's
     # cached URL return a different photo, so it takes an explicit policy.
     if on_conflict == "replace":
-        db.repoint_code(conn, tenant, external_id, sha)
+        db.repoint_code(conn, tenant, external_id, sha, profile_hash)
         return
     raise Conflict(
         f"external_id '{external_id}' already maps to a different image",

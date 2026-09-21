@@ -1,0 +1,88 @@
+# docker-compose-coolify-light.yml -- minimal Coolify deployment:
+# blurd + MinIO object storage, nothing else. One replica, SQLite metadata,
+# dashboard with key minting enabled.
+#
+# Why MinIO instead of the local blob store: blurred media written here can be
+# promoted to production S3 server-side (S3-to-S3), without a local filesystem
+# export/import step.
+#
+# Everything works with zero env set (demo-grade defaults, same convention as
+# docker-compose-local.yml):
+#   dashboard  admin / blurd-demo        (BLURD_DASHBOARD_PASSWORD)
+#   key mint   step-up blurd-demo        (BLURD_DASHBOARD_KEY_SECRET)
+#   api key    blk_demo_...              (BLURD_DEMO_API_KEY)
+#   minio      blurd / blurd-dev-secret  (MINIO_ROOT_USER / MINIO_ROOT_PASSWORD,
+#                                        BLURD_S3_ACCESS_KEY / _SECRET_KEY must
+#                                        match the MinIO root credentials)
+#
+# Only the blurd port needs publishing (API + dashboard). MinIO stays internal;
+# expose :9001 only if you want the MinIO console for debugging.
+
+services:
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-blurd}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-blurd-dev-secret}
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # MinIO has no "create this bucket on boot" flag; one shot with the client.
+  createbucket:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: >
+      /bin/sh -c "mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/$${BLURD_S3_BUCKET} && echo bucket ready"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-blurd}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-blurd-dev-secret}
+      BLURD_S3_BUCKET: ${BLURD_S3_BUCKET:-blurd}
+
+  # One-shot: registers the collector's API key against the volume BEFORE blurd
+  # starts (a second writer on a live SQLite home is refused). Exit 94 -- key
+  # already present -- is success on re-up.
+  bootstrap:
+    build: .
+    image: blurd:0.19.0
+    entrypoint: ["sh", "-c"]
+    command:
+      - python3 run.py keys add collector --key "$$BLURD_DEMO_API_KEY" || test $$? -eq 94
+    environment:
+      BLURD_DEMO_API_KEY: ${BLURD_DEMO_API_KEY:-blk_demo_change_me_in_production_0000000}
+      BLURD_DB_BACKEND: sqlite
+    volumes: ["blurd-home:/var/lib/blurd"]
+
+  blurd:
+    build: .
+    image: blurd:0.19.0
+    stop_grace_period: 40s
+    depends_on:
+      minio: {condition: service_healthy}
+      createbucket: {condition: service_completed_successfully}
+      bootstrap: {condition: service_completed_successfully}
+    environment:
+      BLURD_STORAGE_BACKEND: s3
+      BLURD_S3_ENDPOINT: http://minio:9000
+      BLURD_S3_BUCKET: ${BLURD_S3_BUCKET:-blurd}
+      BLURD_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-blurd}
+      BLURD_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-blurd-dev-secret}
+      BLURD_DB_BACKEND: sqlite
+      BLURD_PULL_MODELS: "1"
+      BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD:-blurd-demo}
+      BLURD_DASHBOARD_KEY_SECRET: ${BLURD_DASHBOARD_KEY_SECRET:-${BLURD_DASHBOARD_PASSWORD:-blurd-demo}}
+      BLURD_DRAIN_SECONDS: ${BLURD_DRAIN_SECONDS:-20}
+      # Optional: BLURD_FETCH_MAX_BYTES, BLURD_QUEUE_MAX, BLURD_WORKERS
+    ports: ["8770:8770"]
+    volumes: ["blurd-home:/var/lib/blurd"]
+
+volumes:
+  minio-data:
+  blurd-home:

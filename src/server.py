@@ -497,6 +497,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "data": client.list(**_filters(q))})
         if sub.rstrip("/") == "/stats":
             return self._send(200, {"ok": True, "data": client.stats()})
+        if sub.rstrip("/") == "/facets":
+            # The dashboard lists unscoped, so its chips list every tenant's
+            # tags/metadata -- a scoped caller never reaches this endpoint.
+            return self._send(200, {"ok": True, "data": db.facets(
+                conn, None, limit=100)})
         if sub.rstrip("/") == "/jobs":
             return self._send(200, {"ok": True, "data": client.jobs(**_job_filters(q))})
         m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})$", sub)

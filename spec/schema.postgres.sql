@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS external_ids (
   tenant       TEXT NOT NULL DEFAULT 'global',
   external_id  TEXT NOT NULL,
   source_sha   TEXT NOT NULL REFERENCES images(source_sha) ON DELETE CASCADE,
+  profile_hash TEXT,                     -- the profile this code was submitted with
   first_seen   TEXT NOT NULL,
   last_seen    TEXT NOT NULL,
   PRIMARY KEY (tenant, external_id)

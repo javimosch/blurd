@@ -298,6 +298,26 @@ def bulk_labels(conn, shas: List[str], tenant: str = None) -> Dict[str, dict]:
     return out
 
 
+def facets(conn, tenant: str = "global", limit: int = 100) -> Dict[str, Any]:
+    """Distinct tags and metadata key=values with usage counts, for the
+    dashboard's clickable filter chips. One label doc per (source_sha,
+    tenant), so a plain count is the same count SQL gets from DISTINCT."""
+    match = {"$match": {"tenant": tenant} if tenant else {}}
+    tags = [{"tag": d["_id"], "n": d["n"]} for d in conn.db["labels"].aggregate([
+        match, {"$unwind": "$tags"},
+        {"$group": {"_id": "$tags", "n": {"$sum": 1}}},
+        {"$sort": {"n": -1, "_id": 1}}, {"$limit": limit}])]
+    meta: Dict[str, list] = {}
+    for d in conn.db["labels"].aggregate([
+            match, {"$project": {"kv": {"$objectToArray": "$meta"}}},
+            {"$unwind": "$kv"},
+            {"$group": {"_id": {"k": "$kv.k", "v": "$kv.v"}, "n": {"$sum": 1}}},
+            {"$sort": {"n": -1, "_id.k": 1, "_id.v": 1}}, {"$limit": limit}]):
+        meta.setdefault(d["_id"]["k"], []).append(
+            {"value": d["_id"]["v"], "n": d["n"]})
+    return {"tags": tags, "meta": meta}
+
+
 def touch_image(conn, sha: str) -> None:
     conn.db["images"].update_one({"_id": sha}, {"$set": {"last_seen": now()}})
 
@@ -428,13 +448,29 @@ def migrate_thumbs_batch(conn, batch: int = 500) -> int:
     return 0
 
 
+def _live_first(cursor):
+    """Newest live artifact wins; expired variants rank last so a dead TTL'd
+    variant cannot shadow a live one for the same source. When every variant
+    is expired the newest still resolves, preserving 410 resource_expired.
+    Callers must have ordered the cursor by created_at DESC already."""
+    docs = list(cursor)
+    if not docs:
+        return None
+    n = now()
+    for d in docs:
+        exp = d.get("expires_at")
+        if not exp or exp > n:
+            return d
+    return docs[0]
+
+
 def thumb_for(conn, sha: str, profile: str = None):
     q: Dict[str, Any] = {"source_sha": sha}
     if profile:
         q["profile_hash"] = profile
-    art = conn.db["artifacts"].find_one(
-        q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1},
-        sort=[("created_at", -1)])
+    art = _live_first(conn.db["artifacts"].find(
+        q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1}
+        ).sort("created_at", -1).limit(8))
     if not art:
         return None
     t = conn.db["thumbs"].find_one({"_id": art["_id"]})
@@ -447,9 +483,9 @@ def blob_ref(conn, sha: str, profile: str = None):
     q: Dict[str, Any] = {"source_sha": sha}
     if profile:
         q["profile_hash"] = profile
-    doc = conn.db["artifacts"].find_one(
+    doc = _live_first(conn.db["artifacts"].find(
         q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-            "expires_at": 1}, sort=[("created_at", -1)])
+            "expires_at": 1}).sort("created_at", -1).limit(8))
     return _row(doc, "id")
 
 
@@ -464,15 +500,21 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
     q: Dict[str, Any] = {"external_id": code}
     if tenant is not None:
         q["tenant"] = tenant
-    shas = [d["source_sha"] for d in conn.db["codes"].find(q, {"source_sha": 1})]
-    if not shas:
+    cdocs = list(conn.db["codes"].find(q, {"source_sha": 1, "profile_hash": 1}))
+    if not cdocs:
         return None
-    aq: Dict[str, Any] = {"source_sha": {"$in": shas}}
+    aq: Dict[str, Any] = {"source_sha": {"$in": [d["source_sha"] for d in cdocs]}}
     if profile:
         aq["profile_hash"] = profile
-    art = conn.db["artifacts"].find_one(
+    else:
+        # A code names the processing it was submitted with; bindings that
+        # predate the column carry no profile_hash and fall back to live-first.
+        bound = [d["profile_hash"] for d in cdocs if d.get("profile_hash")]
+        if bound:
+            aq["profile_hash"] = {"$in": bound}
+    art = _live_first(conn.db["artifacts"].find(
         aq, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-             "expires_at": 1}, sort=[("created_at", -1)])
+             "expires_at": 1}).sort("created_at", -1).limit(8))
     if not art:
         return None
     out = _row(art)
@@ -686,25 +728,33 @@ def find_code_any_tenant(conn, external_id: str):
             for d in conn.db["codes"].find({"external_id": external_id})]
 
 
-def insert_code(conn, tenant: str, external_id: str, sha: str) -> None:
+def insert_code(conn, tenant: str, external_id: str, sha: str,
+                profile_hash: str = None) -> None:
     ts = now()
     conn.db["codes"].insert_one(
         {"_id": _code_id(tenant, external_id), "tenant": tenant,
          "external_id": external_id, "source_sha": sha,
+         "profile_hash": profile_hash,
          "first_seen": ts, "last_seen": ts})
     _sync_labels(conn, sha)
 
 
-def touch_code(conn, tenant: str, external_id: str) -> None:
+def touch_code(conn, tenant: str, external_id: str,
+               profile_hash: str = None) -> None:
+    upd = {"last_seen": now()}
+    if profile_hash:
+        upd["profile_hash"] = profile_hash
     conn.db["codes"].update_one({"_id": _code_id(tenant, external_id)},
-                                {"$set": {"last_seen": now()}})
+                                {"$set": upd})
 
 
-def repoint_code(conn, tenant: str, external_id: str, sha: str) -> None:
+def repoint_code(conn, tenant: str, external_id: str, sha: str,
+                 profile_hash: str = None) -> None:
     prev = conn.db["codes"].find_one({"_id": _code_id(tenant, external_id)})
     conn.db["codes"].update_one(
         {"_id": _code_id(tenant, external_id)},
-        {"$set": {"source_sha": sha, "last_seen": now()}})
+        {"$set": {"source_sha": sha, "profile_hash": profile_hash,
+                  "last_seen": now()}})
     # Both projections change: the old image loses the code, the new one gains
     # it. Forgetting the first is how a code goes on matching its old image.
     if prev and prev.get("source_sha") and prev["source_sha"] != sha:

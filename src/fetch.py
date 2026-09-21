@@ -69,7 +69,7 @@ def fetch_url(url: str, cfg: dict) -> Tuple[bytes, str]:
     """Return (bytes, mime). Redirects are followed by hand, re-validating each hop."""
     allow_private = bool(cfg.get("allow_private_ips", False))
     timeout = float(cfg.get("timeout_s", 15))
-    max_bytes = int(cfg.get("max_bytes", 25 * 1024 * 1024))
+    max_bytes = int(cfg.get("max_bytes", 5 * 1024 * 1024))
     max_redirects = int(cfg.get("max_redirects", 3))
     deadline = time.time() + timeout
 
@@ -120,7 +120,7 @@ def read_file(path: str, cfg: dict) -> Tuple[bytes, str]:
     if not p.is_file():
         raise ValidationError(f"No such file: {path}", {"path": str(p)})
     size = p.stat().st_size
-    max_bytes = int(cfg.get("max_bytes", 25 * 1024 * 1024))
+    max_bytes = int(cfg.get("max_bytes", 5 * 1024 * 1024))
     if size > max_bytes:
         raise ValidationError(f"File too large: {size} > {max_bytes}", {"path": str(p)})
     data = p.read_bytes()

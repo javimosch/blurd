@@ -83,6 +83,8 @@ def migrate(conn) -> None:
         conn.execute("ALTER TABLE artifacts ADD COLUMN expires_at TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_expires "
                      "ON artifacts(expires_at)")
+    if "external_ids" in tables and "profile_hash" not in _columns(conn, "external_ids"):
+        conn.execute("ALTER TABLE external_ids ADD COLUMN profile_hash TEXT")
 
     # The thumbnail move is LAZY, on purpose. Copying every blob into the new
     # table and dropping the column rewrites the whole of `artifacts` in one
@@ -320,6 +322,24 @@ def bulk_labels(conn, shas: List[str], tenant: str = None) -> Dict[str, dict]:
     return out
 
 
+def facets(conn, tenant: str = "global", limit: int = 100) -> Dict[str, Any]:
+    """Distinct tags and metadata key=values with usage counts, for the
+    dashboard's clickable filter chips. Counts are over source_sha, not
+    artifacts -- a reprocessed image still counts once."""
+    tq = "WHERE tenant=?" if tenant else ""
+    ex = [tenant] if tenant else []
+    tags = [{"tag": r["tag"], "n": r["n"]} for r in conn.execute(
+        f"SELECT tag, COUNT(DISTINCT source_sha) n FROM tags {tq} "
+        f"GROUP BY tag ORDER BY n DESC, tag LIMIT ?", ex + [limit])]
+    meta: Dict[str, list] = {}
+    for r in conn.execute(
+            f"SELECT key, value, COUNT(DISTINCT source_sha) n FROM metadata {tq} "
+            f"GROUP BY key, value ORDER BY n DESC, key, value LIMIT ?",
+            ex + [limit]):
+        meta.setdefault(r["key"], []).append({"value": r["value"], "n": r["n"]})
+    return {"tags": tags, "meta": meta}
+
+
 _LEGACY_THUMB: Dict[int, bool] = {}
 
 
@@ -359,6 +379,15 @@ def migrate_thumbs_batch(conn, batch: int = 500) -> int:
     return len(rows)
 
 
+def _live_first(sql: str, args: list):
+    """Resolve to the newest LIVE artifact; expired ones rank last so a dead
+    TTL'd variant can't shadow a live one for the same source. When every
+    variant is expired the newest still resolves, preserving the 410
+    `resource_expired` contract instead of collapsing into a 404."""
+    return (sql + " ORDER BY (a.expires_at IS NULL OR a.expires_at > ?) DESC,"
+                  " a.created_at DESC LIMIT 1", args + [now()])
+
+
 def thumb_for(conn, sha: str, profile: str = None):
     """Just the thumbnail bytes, by one indexed lookup.
 
@@ -372,7 +401,7 @@ def thumb_for(conn, sha: str, profile: str = None):
     if profile:
         sql += " AND a.profile_hash=?"
         args.append(profile)
-    sql += " ORDER BY a.created_at DESC LIMIT 1"
+    sql, args = _live_first(sql, args)
     return conn.execute(sql, args).fetchone()
 
 
@@ -384,7 +413,7 @@ def blob_ref(conn, sha: str, profile: str = None):
     if profile:
         sql += " AND a.profile_hash=?"
         args.append(profile)
-    sql += " ORDER BY a.created_at DESC LIMIT 1"
+    sql, args = _live_first(sql, args)
     return conn.execute(sql, args).fetchone()
 
 
@@ -665,7 +694,13 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
     if profile:
         sql += " AND a.profile_hash = ?"
         args.append(profile)
-    sql += " ORDER BY a.created_at DESC LIMIT 1"
+    else:
+        # A code names the processing it was submitted with, not any variant
+        # of the source: without this, a newer expired artifact under another
+        # profile can shadow (or be shadowed by) the bound one. NULL bindings
+        # predate the column and keep the live-first fallback.
+        sql += " AND (e.profile_hash IS NULL OR a.profile_hash = e.profile_hash)"
+    sql, args = _live_first(sql, args)
     return conn.execute(sql, args).fetchone()
 
 
@@ -683,23 +718,27 @@ def find_code_any_tenant(conn, external_id: str):
         (external_id,)).fetchall()
 
 
-def insert_code(conn, tenant: str, external_id: str, sha: str) -> None:
+def insert_code(conn, tenant: str, external_id: str, sha: str,
+                profile_hash: str = None) -> None:
     ts = now()
     conn.execute(
         """INSERT INTO external_ids (tenant, external_id, source_sha,
-             first_seen, last_seen) VALUES (?,?,?,?,?)""",
-        (tenant, external_id, sha, ts, ts))
+             profile_hash, first_seen, last_seen) VALUES (?,?,?,?,?,?)""",
+        (tenant, external_id, sha, profile_hash, ts, ts))
 
 
-def touch_code(conn, tenant: str, external_id: str) -> None:
-    conn.execute("UPDATE external_ids SET last_seen=? WHERE tenant=? AND external_id=?",
-                 (now(), tenant, external_id))
+def touch_code(conn, tenant: str, external_id: str,
+               profile_hash: str = None) -> None:
+    conn.execute("UPDATE external_ids SET last_seen=?, profile_hash=COALESCE(?, profile_hash) "
+                 "WHERE tenant=? AND external_id=?",
+                 (now(), profile_hash, tenant, external_id))
 
 
-def repoint_code(conn, tenant: str, external_id: str, sha: str) -> None:
+def repoint_code(conn, tenant: str, external_id: str, sha: str,
+                 profile_hash: str = None) -> None:
     conn.execute(
-        "UPDATE external_ids SET source_sha=?, last_seen=? WHERE tenant=? AND external_id=?",
-        (sha, now(), tenant, external_id))
+        "UPDATE external_ids SET source_sha=?, profile_hash=?, last_seen=? WHERE tenant=? AND external_id=?",
+        (sha, profile_hash, now(), tenant, external_id))
 
 
 # --- jobs ---------------------------------------------------------------------

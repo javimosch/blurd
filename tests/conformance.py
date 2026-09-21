@@ -254,7 +254,9 @@ def main():
     check("unknown tag filter still 200s", s == 200)
 
     print("\n-- ttl: blobs expire, rows survive")
-    ttl_code = "conf-ttl-" + code.rsplit("-", 1)[-1]
+    # Unique per run: a stale binding from an earlier run would resolve the
+    # by-code fetch to an artifact this run did not create.
+    ttl_code = f"conf-ttl-{time.time_ns()}"
     ttl_prof = urllib.parse.quote(json.dumps({"storage": {"ttl": 61}}))
     s, b, _ = http(f"{a.url}/v1/images?code={ttl_code}&wait=60&profile={ttl_prof}",
                    "POST", a.api_key, raw, "image/jpeg")
@@ -272,14 +274,27 @@ def main():
     # flat 62s races the job's own runtime. Wait until the deadline + buffer.
     exp_ts = datetime.strptime(tres["expires_at"], "%Y-%m-%dT%H:%M:%SZ"
                                ).replace(tzinfo=timezone.utc).timestamp()
-    time.sleep(max(0, exp_ts - time.time()) + 3)
-    s, b, _ = http(f"{a.url}/v1/blobs/by-code/{ttl_code}", key=a.api_key)
+    # Poll rather than sleep-then-check once: expires_at has second precision
+    # and the check must see the blob strictly past the deadline.
+    deadline = exp_ts + 30
+    while True:
+        s, b, _ = http(f"{a.url}/v1/blobs/by-code/{ttl_code}", key=a.api_key)
+        if s != 200 or time.time() > deadline:
+            break
+        time.sleep(2)
     err = json.loads(b).get("error", {}) if s != 200 else {}
     check("blob is 410 after expiry", s == 410, f"got {s}")
     check("410 is typed resource_expired, not not_found",
           err.get("type") == "resource_expired", err.get("type"))
     s, b, _ = http(f"{a.url}/v1/images/by-code/{ttl_code}", key=a.api_key)
     check("record survives the blob", s == 200, f"got {s}")
+    # `code` was bound to the same source under the default profile earlier in
+    # the run. Its live artifact must not be shadowed by the newer-but-expired
+    # TTL variant -- resolution ranks live artifacts first.
+    s, _, _ = http(f"{a.url}/v1/blobs/by-code/{urllib.parse.quote(code, safe='')}",
+                   key=a.api_key)
+    check("expired variant does not shadow the live artifact", s == 200,
+          f"got {s}")
     s, b, _ = http(f"{a.url}/v1/images?code={ttl_code}&wait=60&profile={ttl_prof}",
                    "POST", a.api_key, raw, "image/jpeg")
     d = json.loads(b).get("data", {})
@@ -295,6 +310,24 @@ def main():
         s, _, _ = http(f"{a.url}/v1/images", "POST", a.api_key,
                        json.dumps({"url": bad}).encode(), "application/json")
         check(f"refuses {bad}", s in (400, 422), f"got {s}")
+
+    print("\n-- input size guard")
+    big = bytes(6 * 1024 * 1024)   # > fetch.max_bytes default (5 MB)
+    s, b, _ = http(f"{a.url}/v1/images?wait=60", "POST", a.api_key,
+                   big, "image/jpeg")
+    eb = json.loads(b) if isinstance(b, (bytes, bytearray)) else b
+    check("upload over max_bytes is rejected at submit", s == 422, f"got {s}")
+    check("rejection is typed validation_error",
+          (eb.get("error") or {}).get("type") == "validation_error",
+          json.dumps(eb)[:200])
+    s, b, _ = http(f"{a.url}/v1/images?wait=60", "POST", a.api_key,
+                   b"this is not an image, it is five bytes of prod truth",
+                   "application/octet-stream")
+    eb = json.loads(b) if isinstance(b, (bytes, bytearray)) else b
+    check("non-image bytes are rejected at submit", s == 422, f"got {s}")
+    check("sniff rejection is typed validation_error",
+          (eb.get("error") or {}).get("type") == "validation_error",
+          json.dumps(eb)[:200])
 
     print("\n-- remote cli == local cli")
     p = cli(a.bin, "--remote", a.url, "--api-key", a.api_key, "get", sha)

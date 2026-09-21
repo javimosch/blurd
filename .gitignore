@@ -9,3 +9,5 @@ venv/
 blobs/
 sidecar/blurd-sidecar
 docs/sheets/
+inventory.sqlite
+inventory.sqlite-*

@@ -3,7 +3,7 @@ name: blurd
 description: Face and licence-plate redaction service. Stores only the redacted image, never the original.
 type: application
 version: 0.2.2
-appVersion: "0.18.0"
+appVersion: "0.19.0"
 keywords: [redaction, blur, gdpr, anonymisation, images]
 home: https://github.com/javimosch/blurd
 sources:

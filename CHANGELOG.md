@@ -4,6 +4,36 @@ blurd was developed privately and is published here from 0.16.0. This is the
 condensed history — it keeps the decisions and the measurements, because several
 of them are the reason the code looks the way it does.
 
+## 0.19.0
+
+**TTL profile binding.** `external_ids` now records the `profile_hash` a code
+was submitted with, so `/v1/blobs/by-code/` resolves to that exact artifact
+instead of "newest artifact for the sha". Previously a newer expired TTL
+variant could shadow a live default-profile artifact (or the reverse) and
+by-code fetches returned the wrong expiry status. Sha-level reads still
+prefer live artifacts over expired variants; when every variant is expired
+the newest still resolves, preserving the 410 `resource_expired` contract.
+Existing bindings (NULL `profile_hash`) keep the live-first fallback. Additive
+migration: `ALTER TABLE external_ids ADD COLUMN profile_hash`.
+
+**Input size guard.** `fetch.max_bytes` now defaults to 5 MB (was 25 MB) and
+applies to all three input paths -- url fetch, `blur <file>`, and raw
+`POST /v1/images` uploads, which were previously bounded only by the 64 MB
+body cap. Oversized input fails at submit with 422 `validation_error`, never
+in the worker. Configurable via `blurd config set fetch.max_bytes` or
+`BLURD_FETCH_MAX_BYTES`. The default was fitted to a 12-month production
+sample (1.23 M images: p99 633 KB, max 1.43 MB, zero files over 5 MB).
+
+**Broken-image rejection at submit.** Raw uploads whose bytes don't sniff to
+a known image type (jpeg/png/webp/bmp/tiff magic) are refused with 422
+`validation_error` instead of queueing and failing in the worker where only
+a poll reveals it. Real prod data contains sub-10-byte "images" (broken
+uploads); they now fail synchronously. Truncated files with valid magic still
+fail typed at decode -- that check needs the decoder and stays in the worker.
+
+**Dashboard filter chips.** `GET /ui-api/facets` feeds clickable tag and
+metadata key=value chips in the dashboard; tag pills on cards filter too.
+
 ## 0.18.0
 
 **Ephemeral outputs: `--ttl` / `profile.storage.ttl`.**
