@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   needs_review  INTEGER NOT NULL DEFAULT 0,
   stats_json    TEXT NOT NULL,            -- timings breakdown + model versions
   created_at    TEXT NOT NULL,
+  expires_at    TEXT,                     -- NULL = kept forever
   UNIQUE (source_sha, profile_hash)
 );
 
@@ -97,6 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_detections_artifact ON detections(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_source    ON artifacts(source_sha);
 CREATE INDEX IF NOT EXISTS idx_artifacts_created   ON artifacts(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_review    ON artifacts(needs_review);
+CREATE INDEX IF NOT EXISTS idx_artifacts_expires   ON artifacts(expires_at);
 CREATE INDEX IF NOT EXISTS idx_tags_tag            ON tags(tenant, tag);
 CREATE INDEX IF NOT EXISTS idx_metadata_kv         ON metadata(tenant, key, value);
 

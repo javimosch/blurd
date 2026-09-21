@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from .canonical import profile_hash
+from .errors import ValidationError
 
 DEFAULT_HOME = Path(os.environ.get("BLURD_HOME", Path.home() / ".blurd"))
 
@@ -157,6 +158,16 @@ class Config:
                 prof["detect"][cls]["min_score"] = round(float(prof["detect"][cls]["min_score"]), 3)
         prof["redact"]["strength"] = round(float(prof["redact"]["strength"]), 3)
         prof["redact"]["expand"] = round(float(prof["redact"]["expand"]), 3)
+        ttl = prof.get("storage", {}).get("ttl")
+        if ttl is not None:
+            # Seconds; part of profile_hash, so a different TTL never reuses a
+            # permanent artifact and vice versa.
+            ttl = int(ttl)
+            if not 60 <= ttl <= 30 * 86400:
+                raise ValidationError(
+                    "storage.ttl must be between 60 and 2592000 seconds",
+                    {"got": ttl, "min": 60, "max": 2592000})
+            prof["storage"]["ttl"] = ttl
         return prof
 
     @staticmethod
@@ -180,6 +191,7 @@ ENV_OVERRIDES = {
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),
     "BLURD_DASHBOARD_PASSWORD": ("dashboard_password", str),
+    "BLURD_DASHBOARD_KEY_SECRET": ("dashboard_key_secret", str),
     "BLURD_DB_BACKEND": ("db.backend", str),
     "BLURD_DB_DSN": ("db.dsn", str),
     "BLURD_DB_DATABASE": ("db.database", str),

@@ -11,6 +11,7 @@ EXIT_VALIDATION_ERROR = 87
 # 90-99 resource/state
 EXIT_RESOURCE_NOT_FOUND = 92
 EXIT_RESOURCE_CONFLICT = 94
+EXIT_RESOURCE_EXPIRED = 95
 # 100-109 integration/external - transient, retry with backoff
 EXIT_CONNECTION_TIMEOUT = 105
 EXIT_API_UNAVAILABLE = 106
@@ -31,6 +32,7 @@ HTTP_FOR_EXIT = {
     EXIT_BAD_PERMISSIONS: 403,
     EXIT_RESOURCE_NOT_FOUND: 404,
     EXIT_RESOURCE_CONFLICT: 409,
+    EXIT_RESOURCE_EXPIRED: 410,
     EXIT_CONNECTION_TIMEOUT: 504,
     EXIT_API_UNAVAILABLE: 502,
     EXIT_AUTH_FAILED: 401,
@@ -109,6 +111,19 @@ class NotFound(BlurdError):
 class Conflict(BlurdError):
     def __init__(self, message, details=None):
         super().__init__(EXIT_RESOURCE_CONFLICT, "resource_conflict", message, details)
+
+
+class Expired(BlurdError):
+    """The record exists but its bytes were pruned by TTL -- distinct from
+    NotFound so a poller can tell "resubmit" from "wrong id"."""
+    def __init__(self, resource_type, resource_id, details=None):
+        super().__init__(
+            EXIT_RESOURCE_EXPIRED, "resource_expired",
+            f"{resource_type} '{resource_id}' has expired",
+            {"resource_type": resource_type, "resource_id": resource_id,
+             **(details or {})},
+            recoverable=True,
+            suggestions=["Resubmit the image to regenerate it"])
 
 
 class AuthFailed(BlurdError):

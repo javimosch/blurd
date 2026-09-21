@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from . import db, pipeline, resources
+from . import db, pipeline, resources, store
 from .scope import Scope
 from .canonical import canonical_json
 from .config import Config
@@ -99,6 +99,7 @@ class JobQueue:
         while not self._stop.wait(self.REAP_INTERVAL):
             try:
                 self.reap()
+                self.prune_expired()
             except Exception:
                 pass          # a failed sweep must never take the process down
 
@@ -124,6 +125,28 @@ class JobQueue:
     @property
     def draining(self) -> bool:
         return self._draining.is_set()
+
+    def prune_expired(self) -> int:
+        """Delete objects and thumbnails for artifacts past their TTL.
+
+        The row survives (sha, detections, codes) -- only the bytes go, so a
+        late fetch gets a typed 410 instead of a 404 that looks like the image
+        was never processed. Bounded per pass; N replicas racing is safe since
+        the store delete is idempotent.
+        """
+        conn = db.connect(self.cfg.db_file)
+        blobs = store.build(self.cfg)
+        rows = db.expired_blobs(conn, 200)
+        for r in rows:
+            try:
+                blobs.delete(r["blob_path"])
+            except Exception:
+                pass          # already gone; the row still gets marked
+            db.expire_artifact(conn, r["id"])
+        if rows:
+            conn.commit()
+        conn.close()
+        return len(rows)
 
     def reap(self) -> dict:
         """Reclaim jobs whose owner is no longer alive.
@@ -501,8 +524,12 @@ def resolve_code(conn, external_id: str, profile_hash: str = None,
         if row is None:
             return None
         sha = row["source_sha"]
-    if profile_hash and db.find_artifact(conn, sha, profile_hash) is None:
-        return None
+    if profile_hash:
+        art = db.find_artifact(conn, sha, profile_hash)
+        # An expired or pruned artifact does not satisfy the code: the caller
+        # gets a normal submission and the image is reprocessed instead.
+        if art is None or not art["blob_path"] or db.artifact_expired(art):
+            return None
     return sha
 
 

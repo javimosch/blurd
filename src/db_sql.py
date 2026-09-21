@@ -49,7 +49,7 @@ def init(db_file: Path) -> None:
     # Serialised across replicas: three pods starting together would otherwise
     # migrate and apply the schema at the same moment.
     with d.migration_lock(conn):
-        if d.supports_legacy_migrations() and _tables(conn):
+        if _tables(conn):
             migrate(conn)
         conn.executescript(d.schema_sql())
         conn.commit()
@@ -79,6 +79,10 @@ def migrate(conn) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN force INTEGER NOT NULL DEFAULT 0")
     if "jobs" in tables and "owner_id" not in _columns(conn, "jobs"):
         conn.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
+    if "artifacts" in tables and "expires_at" not in _columns(conn, "artifacts"):
+        conn.execute("ALTER TABLE artifacts ADD COLUMN expires_at TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_expires "
+                     "ON artifacts(expires_at)")
 
     # The thumbnail move is LAZY, on purpose. Copying every blob into the new
     # table and dropping the column rewrites the whole of `artifacts` in one
@@ -90,6 +94,11 @@ def migrate(conn) -> None:
     # column while it exists, and `blurd migrate-thumbs` moves the backlog in
     # resumable batches when the operator chooses.
     if "tags" not in tables or "tenant" in _columns(conn, "tags"):
+        conn.commit()
+        return
+    if not dialect().supports_legacy_migrations():
+        # The rebuild below is SQLite executescript; a Postgres database never
+        # predates the tenant columns, so reaching this means nothing to do.
         conn.commit()
         return
 
@@ -222,10 +231,10 @@ def insert_artifact(conn, row: dict, dets: List[dict]) -> int:
     aid = conn.execute(
         """INSERT INTO artifacts (source_sha, profile_hash, profile_json, blob_path,
              blob_sha, blob_size, mime, n_faces, n_plates, min_score, needs_review,
-             stats_json, created_at)
+             stats_json, created_at, expires_at)
            VALUES (:source_sha,:profile_hash,:profile_json,:blob_path,:blob_sha,
                    :blob_size,:mime,:n_faces,:n_plates,:min_score,:needs_review,
-                   :stats_json,:created_at)
+                   :stats_json,:created_at,:expires_at)
            RETURNING id""", row).fetchone()["id"]
     if thumb:
         conn.execute("INSERT INTO thumbs (artifact_id, jpeg) VALUES (?,?) "
@@ -357,7 +366,7 @@ def thumb_for(conn, sha: str, profile: str = None):
     and a discarded JSON document per tile, 24 times a page."""
     # COALESCE so a database mid-migration serves thumbnails from either place.
     col = ("COALESCE(t.jpeg, a.thumb)" if has_legacy_thumb_column(conn) else "t.jpeg")
-    sql = (f"SELECT {col} AS thumb, a.blob_sha, a.source_sha FROM artifacts a "
+    sql = (f"SELECT {col} AS thumb, a.id, a.blob_sha, a.source_sha, a.expires_at FROM artifacts a "
            "LEFT JOIN thumbs t ON t.artifact_id = a.id WHERE a.source_sha=?")
     args = [sha]
     if profile:
@@ -369,7 +378,7 @@ def thumb_for(conn, sha: str, profile: str = None):
 
 def blob_ref(conn, sha: str, profile: str = None):
     """Blob path + etag without building a record."""
-    sql = ("SELECT a.blob_path, a.blob_sha, a.mime, a.source_sha FROM artifacts a "
+    sql = ("SELECT a.id, a.blob_path, a.blob_sha, a.mime, a.source_sha, a.expires_at FROM artifacts a "
            "WHERE a.source_sha=?")
     args = [sha]
     if profile:
@@ -485,7 +494,8 @@ def query_artifacts(conn, *, tag=None, meta=None, sha=None, needs_review=None,
     # Explicit columns, never `a.*`: on a database that still has the legacy
     # `thumb` column, `a.*` pulls a 14 kB blob for every row of every page.
     cols = ("a.id, a.source_sha, a.profile_hash, a.blob_path, a.blob_sha, a.blob_size, "
-            "a.mime, a.n_faces, a.n_plates, a.min_score, a.needs_review, a.created_at")
+            "a.mime, a.n_faces, a.n_plates, a.min_score, a.needs_review, a.created_at, "
+            "a.expires_at")
     rows = conn.execute(
         f"""SELECT {cols}, i.width, i.height, i.byte_size, i.source_kind, i.source_ref
             {joins} WHERE {page_where}
@@ -593,13 +603,29 @@ def delete_artifact(conn, artifact_id: int) -> None:
     conn.execute("DELETE FROM artifacts WHERE id=?", (artifact_id,))
 
 
+def expired_blobs(conn, limit: int = 200) -> List[dict]:
+    """Artifacts past their TTL whose object may still be in the store."""
+    return conn.execute(
+        "SELECT id, blob_path FROM artifacts WHERE expires_at IS NOT NULL "
+        "AND expires_at < ? AND blob_path != '' LIMIT ?",
+        (now(), limit)).fetchall()
+
+
+def expire_artifact(conn, artifact_id: int) -> None:
+    """TTL passed: drop the blob reference and thumbnail; keep the record."""
+    conn.execute("UPDATE artifacts SET blob_path='' WHERE id=?", (artifact_id,))
+    conn.execute("DELETE FROM thumbs WHERE artifact_id=?", (artifact_id,))
+
+
 def artifact_blob_paths(conn, sha: str) -> List[str]:
     return [r["blob_path"] for r in conn.execute(
-        "SELECT blob_path FROM artifacts WHERE source_sha=?", (sha,))]
+        "SELECT blob_path FROM artifacts WHERE source_sha=? AND blob_path!=''",
+        (sha,))]
 
 
 def all_blob_paths(conn) -> List[str]:
-    return [r["blob_path"] for r in conn.execute("SELECT blob_path FROM artifacts")]
+    return [r["blob_path"] for r in conn.execute(
+        "SELECT blob_path FROM artifacts WHERE blob_path!=''")]
 
 
 def release_tenant_labels(conn, sha: str, tenant: str) -> None:
@@ -627,7 +653,7 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
     `tenant=None` means an unscoped caller and searches across tenants."""
     tcol = ("COALESCE(t.jpeg, a.thumb)" if (with_thumb and has_legacy_thumb_column(conn))
             else "t.jpeg")
-    sql = (f"""SELECT a.blob_path, a.blob_sha, a.mime, {tcol} AS thumb, a.source_sha
+    sql = (f"""SELECT a.id, a.blob_path, a.blob_sha, a.mime, {tcol} AS thumb, a.source_sha, a.expires_at
                FROM external_ids e
                JOIN artifacts a ON a.source_sha = e.source_sha
                LEFT JOIN thumbs t ON t.artifact_id = a.id

@@ -51,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--mode", choices=["pixelate", "blur", "solid"])
     b.add_argument("--face-score", type=float)
     b.add_argument("--plate-score", type=float)
+    b.add_argument("--ttl", type=int, metavar="SECONDS",
+                   help="Prune the redacted blob after N seconds (min 60)")
     b.add_argument("--force", action="store_true")
     b.add_argument("--out", help="Also write the redacted image here")
 
@@ -193,6 +195,8 @@ def _overrides(args) -> dict:
         o.setdefault("detect", {}).setdefault("face", {})["min_score"] = args.face_score
     if getattr(args, "plate_score", None) is not None:
         o.setdefault("detect", {}).setdefault("plate", {})["min_score"] = args.plate_score
+    if getattr(args, "ttl", None) is not None:
+        o.setdefault("storage", {})["ttl"] = args.ttl
     return o
 
 

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,7 @@ var ui embed.FS
 type config struct {
 	blurd     string
 	apiKey    string
+	host      string
 	port      int
 	dashUser  string
 	dashPass  string
@@ -45,6 +47,7 @@ var cfg config
 func main() {
 	flag.StringVar(&cfg.blurd, "blurd", env("BLURD_URL", "http://127.0.0.1:8770"), "blurd base URL")
 	flag.StringVar(&cfg.apiKey, "api-key", os.Getenv("BLURD_API_KEY"), "blurd API key (server-side only)")
+	flag.StringVar(&cfg.host, "host", env("SIDECAR_HOST", "127.0.0.1"), "interface to bind (0.0.0.0 inside a container)")
 	flag.IntVar(&cfg.port, "port", 8790, "port to listen on")
 	flag.StringVar(&cfg.dashUser, "dashboard-user", "admin", "blurd dashboard user, for the printed link")
 	flag.StringVar(&cfg.dashPass, "dashboard-password", os.Getenv("BLURD_DASHBOARD_PASSWORD"), "blurd dashboard password, for the printed link")
@@ -66,7 +69,7 @@ func main() {
 	mux.HandleFunc("/api/image", apiImage)
 	mux.HandleFunc("/api/health", apiHealth)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.port)
+	addr := fmt.Sprintf("%s:%d", cfg.host, cfg.port)
 	banner(addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
@@ -200,6 +203,29 @@ func apiSubmit(w http.ResponseWriter, r *http.Request) {
 		q.Set("wait", wait)
 	}
 
+	// ttl rides inside the processing profile (it is part of profile_hash), so
+	// it reaches the API as a profile override, not a dedicated parameter.
+	var profile map[string]any
+	if p := r.FormValue("profile"); p != "" {
+		json.Unmarshal([]byte(p), &profile)
+	}
+	if ttl := strings.TrimSpace(r.FormValue("ttl")); ttl != "" {
+		n, err := strconv.Atoi(ttl)
+		if err != nil {
+			http.Error(w, "ttl must be a number of seconds", http.StatusBadRequest)
+			return
+		}
+		if profile == nil {
+			profile = map[string]any{}
+		}
+		st, _ := profile["storage"].(map[string]any)
+		if st == nil {
+			st = map[string]any{}
+		}
+		st["ttl"] = n
+		profile["storage"] = st
+	}
+
 	// A URL submission needs no upload at all -- this is how a storage service
 	// with its own object store would usually feed blurd.
 	if src := strings.TrimSpace(r.FormValue("url")); src != "" {
@@ -218,6 +244,9 @@ func apiSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		if oc := q.Get("on_conflict"); oc != "" {
 			payload["on_conflict"] = oc
+		}
+		if profile != nil {
+			payload["profile"] = profile
 		}
 		body, _ := json.Marshal(payload)
 		sub := url.Values{}
@@ -245,6 +274,10 @@ func apiSubmit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "read failed", http.StatusBadRequest)
 		return
+	}
+	if profile != nil {
+		pj, _ := json.Marshal(profile)
+		q.Set("profile", string(pj))
 	}
 	status, data, _, err := call("POST", "/v1/images?"+q.Encode(),
 		bytes.NewReader(raw), "application/octet-stream")

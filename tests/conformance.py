@@ -11,6 +11,7 @@ binary and daemon and it must pass unchanged.
 
 import argparse
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -251,6 +252,42 @@ def main():
           any(i["source_sha"] == sha for i in listing.get("items", [])))
     s, _, _ = http(f"{a.url}/v1/images?tag=no-such-tag-xyz", key=a.api_key)
     check("unknown tag filter still 200s", s == 200)
+
+    print("\n-- ttl: blobs expire, rows survive")
+    ttl_code = "conf-ttl-" + code.rsplit("-", 1)[-1]
+    ttl_prof = urllib.parse.quote(json.dumps({"storage": {"ttl": 61}}))
+    s, b, _ = http(f"{a.url}/v1/images?code={ttl_code}&wait=60&profile={ttl_prof}",
+                   "POST", a.api_key, raw, "image/jpeg")
+    d = json.loads(b).get("data", {})
+    tres = d.get("result") or {}
+    check("ttl submit completes", s == 200 and d.get("status") == "done",
+          f"got {s}/{d.get('status')}")
+    check("result carries expires_at", bool(tres.get("expires_at")))
+    check("ttl lands in the profile (its own cache identity)",
+          tres.get("profile_hash") is not None
+          and tres.get("profile_hash") != d2.get("profile_hash"))
+    s, b, _ = http(f"{a.url}/v1/blobs/by-code/{ttl_code}", key=a.api_key)
+    check("blob fetchable before expiry", s == 200, f"got {s}")
+    # expires_at counts from processing, not from this response — sleeping a
+    # flat 62s races the job's own runtime. Wait until the deadline + buffer.
+    exp_ts = datetime.strptime(tres["expires_at"], "%Y-%m-%dT%H:%M:%SZ"
+                               ).replace(tzinfo=timezone.utc).timestamp()
+    time.sleep(max(0, exp_ts - time.time()) + 3)
+    s, b, _ = http(f"{a.url}/v1/blobs/by-code/{ttl_code}", key=a.api_key)
+    err = json.loads(b).get("error", {}) if s != 200 else {}
+    check("blob is 410 after expiry", s == 410, f"got {s}")
+    check("410 is typed resource_expired, not not_found",
+          err.get("type") == "resource_expired", err.get("type"))
+    s, b, _ = http(f"{a.url}/v1/images/by-code/{ttl_code}", key=a.api_key)
+    check("record survives the blob", s == 200, f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/images?code={ttl_code}&wait=60&profile={ttl_prof}",
+                   "POST", a.api_key, raw, "image/jpeg")
+    d = json.loads(b).get("data", {})
+    check("resubmit after expiry reprocesses", d.get("status") == "done"
+          and (d.get("result") or {}).get("cached") is False,
+          f"{d.get('status')}/cached={((d.get('result') or {}).get('cached'))}")
+    s, b, _ = http(f"{a.url}/v1/blobs/by-code/{ttl_code}", key=a.api_key)
+    check("revived blob is fetchable again", s == 200, f"got {s}")
 
     print("\n-- ssrf guards")
     for bad in ("http://127.0.0.1:1/x.jpg", "http://169.254.169.254/latest/meta-data/",

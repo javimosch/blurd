@@ -92,6 +92,15 @@ for _name in _DISPATCHED:
     globals()[_name] = _make(_name)
 del _name
 
+
+def artifact_expired(row) -> bool:
+    """True when the artifact's TTL has passed. A predicate over a fetched row
+    (sqlite3.Row has no .get, and pre-TTL Mongo documents lack the key), so it
+    belongs to no backend."""
+    # `in row` on a sqlite3.Row tests VALUES, not columns — must use keys().
+    return ("expires_at" in row.keys() and bool(row["expires_at"])
+            and row["expires_at"] <= db_sql.now())
+
 __all__ = sorted(_DISPATCHED + list(_SHARED) +
                  ["SORTS", "JOB_SORTS", "COUNT_CAP", "STATS_TTL",
                   "INSTANCE_STALE_SECONDS"])

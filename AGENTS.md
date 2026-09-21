@@ -59,7 +59,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Seam guard | `tests/seam_check.py` |
 | Throughput, capacity, scaling | `bench/throughput.py`, `spec/capacity.md` |
 | Listing performance, pagination | `db_sql.py` / `db_mongo.py` (`bulk_labels`, `query_artifacts`), `spec/scaling.md` |
-| Black-box conformance (126 checks) | `tests/conformance.py` |
+| Black-box conformance (134 checks) | `tests/conformance.py` |
 | Two backends must answer identically (77 checks) | `tests/backend_parity.py` |
 | Queue backpressure and the byte bound | `tests/queue_bytes.py` |
 | **How to deploy anything** (the operator hub) | `docs/deployment.md` |
@@ -227,6 +227,16 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
     reads need an operator key. The `id` is client-generated so the dual-write
     (app + `FEEDBACK_RELAY`) is idempotent.
 
+44. **TTL deletes bytes, keeps the row.** `storage.ttl` is part of the
+    profile (and profile_hash) so an expiring output never shares cache
+    identity with a permanent one. On expiry the blob and thumb are pruned —
+    by the reaper sweep and lazily on read — while the artifact, codes and
+    detections stay; fetches answer 410 `resource_expired`, never 404, so a
+    poller can tell "resubmit" from "never existed". `expires_at` is counted
+    from processing, not submission: queued time must not eat the blob's life.
+    sqlite3.Row has no `.get` and `x in row` tests VALUES — check column
+    presence with `row.keys()`.
+
 ## Verifying a change
 ```bash
 ./demo.sh                      # blurd + Go sidecar, prints keys and URLs
@@ -239,7 +249,7 @@ python3 bench/throughput.py --url http://127.0.0.1:8771 --api-key "$KEY"
 python3 tests/conformance.py --bin ./blurd --url http://127.0.0.1:8771 \
     --api-key "$(cat /tmp/blurd-demo/sidecar.key)" --image /path/to/test.jpg
 ```
-126 checks — but **only if you pass `--dashboard-password` and scope the two
+134 checks — but **only if you pass `--dashboard-password` and scope the two
 keys with the tags `conformance-a` / `conformance-b`**; otherwise whole sections
 are skipped or fail for the wrong reason. See the `blurd-testing` skill. They
 test a binary and a URL, never Python imports, so the same file is the

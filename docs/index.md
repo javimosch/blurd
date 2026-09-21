@@ -99,3 +99,4 @@ git clone https://github.com/javimosch/blurd && cd blurd
 blurd is [AGPL-3.0](https://github.com/javimosch/blurd/blob/main/LICENSE). The
 plate detector derives from YOLOv9 (GPL-3.0); the face detector is Apache-2.0.
 Neither model is redistributed by this repository — both are fetched at runtime.
+[Which models, and why](models.html).

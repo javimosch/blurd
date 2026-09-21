@@ -21,8 +21,8 @@ from pathlib import Path
 from . import __version__, auth, db, jobs as jobs_mod, scope as scope_mod
 from .client import LocalClient
 from .config import Config
-from .errors import (AuthFailed, BlurdError, Conflict, Internal, NotFound,
-                     ValidationError)
+from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
+                     NotFound, ValidationError)
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 MAX_BODY = 64 * 1024 * 1024
@@ -375,6 +375,7 @@ class Handler(BaseHTTPRequestHandler):
                                   with_thumb=True)
         if row is None:
             raise NotFound("external_id", code)
+        self._check_expired(conn, row, "external_id", code)
         if thumb:
             return self._send_cached(row["thumb"] or b"", "image/jpeg",
                                      (row["blob_sha"] or "")[:32] + "-t")
@@ -384,6 +385,19 @@ class Handler(BaseHTTPRequestHandler):
             "X-Blurd-Source-Sha": row["source_sha"],
             "X-Blurd-External-Id": code,
         })
+
+    def _check_expired(self, conn, row, res_type, res_id) -> None:
+        """410 for a TTL'd artifact whose blob is gone or due. The row stays;
+        lazily prune the object here so a slow sweep never serves stale bytes."""
+        if not db.artifact_expired(row):
+            return
+        # sqlite3.Row has no .get: column presence was already established.
+        if "blob_path" in row.keys() and row["blob_path"]:
+            self.server.blurd_store.delete(row["blob_path"])
+        if "id" in row.keys() and row["id"] is not None:
+            db.expire_artifact(conn, row["id"])
+            conn.commit()
+        raise Expired(res_type, res_id, {"expired_at": row["expires_at"]})
 
     def _serve_image(self, client, conn, sha, profile, thumb=False, scope=None):
         """Serve bytes from one indexed lookup.
@@ -399,6 +413,7 @@ class Handler(BaseHTTPRequestHandler):
         if scope is not None and not scope.is_global:
             if not scope.allows_sha(conn, row["source_sha"]):
                 raise NotFound("image", sha)
+        self._check_expired(conn, row, "image", sha)
         if thumb:
             return self._send_cached(row["thumb"] or b"", "image/jpeg",
                                      (row["blob_sha"] or "")[:32] + "-t")

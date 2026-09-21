@@ -4,6 +4,24 @@ blurd was developed privately and is published here from 0.16.0. This is the
 condensed history — it keeps the decisions and the measurements, because several
 of them are the reason the code looks the way it does.
 
+## 0.18.0
+
+**Ephemeral outputs: `--ttl` / `profile.storage.ttl`.**
+
+For deployments where the caller keeps the redacted file (the geored
+integration writes it back to its own media store), blurd no longer has to be
+the permanent store. `blurd blur img.jpg --ttl 86400` — or
+`{"storage":{"ttl":N}}` in the profile overrides — records `expires_at` on the
+artifact; the reaper sweep then deletes the blob and thumbnail, and the read
+path prunes lazily so a slow sweep never serves stale bytes. The record,
+codes, tags and detections survive: a late fetch answers **410
+`resource_expired`** rather than 404, so a poller can tell "missed the window,
+resubmit" from "never existed". TTL is part of `profile_hash`, so an expiring
+output can never cache-collide with a permanent one; `expires_at` counts from
+processing, not submission, so queue time does not eat the blob's life. Bounds:
+60 s–30 days. The test sidecar exposes the field. New conformance section:
+submit → fetch → expiry → 410 → record survives → resubmit revives.
+
 ## 0.17.0
 
 **Portable API keys, and the CLI conformance specs end to end.**

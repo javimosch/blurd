@@ -31,5 +31,9 @@ Profile (the shipped default):
 
     profile_hash = 1e994f69934887ce
 
+`storage.ttl` is optional and absent from the default: a blob that expires is
+a *different processing intent*, so it gets its own profile_hash rather than
+sharing cache space with the permanent one.
+
 Any port (Go, machin, …) that produces a different value for this input is
 wrong and will invalidate every artifact already in the database.

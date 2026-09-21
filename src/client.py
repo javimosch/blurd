@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from . import auth, db, jobs, pipeline, store as _store
 from .scope import Scope
 from .config import Config
-from .errors import BlurdError, Internal, NotFound, Upstream
+from .errors import BlurdError, Expired, Internal, NotFound, Upstream
 
 
 class LocalClient:
@@ -107,7 +107,10 @@ class LocalClient:
             lab = labels.get(r["source_sha"], {"tags": [], "metadata": {}, "codes": []})
             items.append({
                 "source_sha": r["source_sha"], "profile_hash": r["profile_hash"],
-                "created_at": r["created_at"], "n_faces": r["n_faces"],
+                "created_at": r["created_at"],
+                "expires_at": (r["expires_at"]
+                               if "expires_at" in r.keys() else None),
+                "n_faces": r["n_faces"],
                 "n_plates": r["n_plates"], "needs_review": bool(r["needs_review"]),
                 "width": r["width"], "height": r["height"],
                 "bytes": r["blob_size"], "mime": r["mime"],
@@ -136,7 +139,10 @@ class LocalClient:
 
     def blob(self, sha: str, profile: Optional[str] = None,
              scope: Scope = None) -> bytes:
+        # The record stays readable after TTL -- only the bytes are gone.
         rec = self.get(sha, profile, scope)
+        if rec.get("expires_at") and rec["expires_at"] <= db.now():
+            raise Expired("image", sha, {"expired_at": rec["expires_at"]})
         return _store.build(self.cfg).get(rec["blob"]["key"])
 
     def stats(self, scope: Scope = None) -> Dict[str, Any]:

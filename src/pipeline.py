@@ -8,6 +8,7 @@ dimensions, and the redacted output are persisted.
 """
 
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -147,7 +148,8 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     # or a model upgrade would silently keep serving stale redactions.
     cached = db.find_artifact(conn, sha, phash)
     blobs = store.build(cfg)
-    if cached and not force and blobs.exists(cached["blob_path"]):
+    live = (cached and cached["blob_path"] and not db.artifact_expired(cached))
+    if live and not force and blobs.exists(cached["blob_path"]):
         db.merge_tags(conn, sha, tags or [], tenant)
         db.merge_metadata(conn, sha, metadata or {}, tenant)
         db.touch_image(conn, sha)
@@ -218,11 +220,23 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
         "min_score": min(scores) if scores else None,
         "needs_review": needs_review, "stats_json": canonical_json(stats),
         "thumb": thumb, "created_at": db.now(),
+        "expires_at": _expires_at(profile),
     }, [d.as_dict() for d in dets])
     conn.commit()
 
     row = db.find_artifact_by_id(conn, aid)
     return artifact_result(cfg, conn, row, cached=False, tenant=tenant)
+
+
+def _expires_at(profile: dict) -> Optional[str]:
+    """TTL lives in the profile (so it is part of profile_hash) but the
+    deadline is counted from processing, not submission: queued time must not
+    eat the blob's lifetime."""
+    ttl = profile.get("storage", {}).get("ttl")
+    if ttl is None:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(seconds=int(ttl))
+            ).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _blob_location(cfg: Config, rel: str) -> str:
@@ -262,6 +276,8 @@ def artifact_result(cfg: Config, conn, row, cached: bool,
         "detections": db.detections_of(conn, row["id"]),
         "stats": _json.loads(row["stats_json"]),
         "created_at": row["created_at"],
+        "expires_at": (row["expires_at"] if "expires_at" in row.keys()
+                       else None),
         "errors": [],
         "warnings": (["no detections: redaction may have missed something"]
                      if row["needs_review"] else []),

@@ -212,6 +212,18 @@ POST /v1/images ─► validate (scheme/DNS/IP) ─► enqueue ─► 202 + job 
                ──► SQLite: image, artifact, detections, tags, metadata, code
 ```
 
+### Ephemeral outputs (TTL)
+
+`--ttl 86400` (or `profile.storage.ttl` in the API) prunes the redacted blob
+and thumbnail after the deadline — for callers who keep the output themselves
+and only need blurd as a transform. The artifact record, codes, tags and
+detections survive; a fetch past the deadline answers **410
+`resource_expired`** (distinct from 404), and resubmitting the same source
+under the same code regenerates it. TTL is part of `profile_hash`, so an
+expiring output can never collide with the permanent one. A sweeper on the
+job reaper deletes expired objects; the read path also prunes lazily so a slow
+sweep never serves stale bytes.
+
 ### Async durability, deliberately asymmetric
 
 A queued **url** job survives a daemon restart — the daemon can simply re-fetch
@@ -232,9 +244,11 @@ Both detectors are pretrained and pinned by URL **and sha256**:
 | Faces | YuNet (`opencv_zoo`) | 233 KB | Apache-2.0 |
 | Plates | YOLOv9-t 512 end2end (`ankandrew/open-image-models`) | 7.8 MB | GPL-3.0 lineage |
 
-Fine-tuning is a data-collection project, not a prerequisite. Add a model by
-writing a class in `src/detect.py` and an entry in `src/models.py`; nothing
-else in blurd needs to know it exists.
+Fine-tuning is a data-collection project, not a prerequisite. Why these two
+were picked — and where detection falls off at distance — is in
+[docs/models.md](docs/models.md). Add a model by writing a class in
+`src/detect.py` and an entry in `src/models.py`; nothing else in blurd needs
+to know it exists.
 
 > **Licensing.** The plate model derives from YOLOv9 (GPL-3.0). Fine for a POC,
 > a real constraint if blurd is ever offered as a hosted product. The face path
@@ -350,7 +364,7 @@ replica; **blobs** decide whether those replicas can serve each other's work.
 | metadata | SQLite (a file) | Postgres **or** MongoDB |
 | blobs | local disk **or** S3 | S3 **or** one shared (RWX) volume |
 
-Every combination above passes the same 126 checks — on SQLite, Postgres and
+Every combination above passes the same 134 checks — on SQLite, Postgres and
 MongoDB, on local and S3 blobs, single-instance and behind a load balancer.
 The one configuration that fails is several replicas with a **volume each**:
 the metadata read succeeds while the blob 404s on whichever replica did not
@@ -471,7 +485,7 @@ endpoint in that order.
 
 ## Storage
 
-Three metadata backends, one environment variable, the same 126 conformance
+Three metadata backends, one environment variable, the same 134 conformance
 checks on each:
 
 | `BLURD_DB_BACKEND` | store | for |
@@ -506,13 +520,13 @@ or **machin-only** implementation is a rewrite of the *daemon*, not of the
 - `spec/` holds the wire format, the SQL schema, the blob layout and the
   `profile_hash` algorithm, language-neutrally.
 - `tests/conformance.py` tests *a binary and a base URL*. A port is done when
-  it passes those 126 checks unchanged.
+  it passes those 134 checks unchanged.
 - The HTTP surface uses stdlib `http.server` and raw-body uploads rather than a
   framework and multipart, so nothing in the contract is Python-shaped.
 
 ## Status
 
-POC. Verified end to end by `tests/conformance.py` (126 checks, all passing on SQLite, Postgres, MongoDB, and a three-replica cluster) and `tests/backend_parity.py` (77 checks that two backends answer identically)
+POC. Verified end to end by `tests/conformance.py` (134 checks, all passing on SQLite, Postgres, MongoDB, and a three-replica cluster) and `tests/backend_parity.py` (77 checks that two backends answer identically)
 plus a cold start from an empty home: CLI, API, async jobs, unique-code
 resolution and short-circuiting, conflict policy, ETag/304, dashboard, sidecar,
 cache behaviour, SSRF guards, CSRF guards, dashboard/API credential separation,

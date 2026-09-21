@@ -111,6 +111,9 @@ img.result{max-width:100%;border-radius:var(--r);border:1px solid var(--line);
     <label>metadata (JSON)</label>
     <input id="p-meta" placeholder='{"site":"paris","camera":"cam3"}'>
 
+    <label>ttl seconds — empty keeps the blob forever</label>
+    <input id="p-ttl" type="number" min="60" placeholder="86400">
+
     <div class="row">
       <button id="submit">Submit &rarr; get job</button>
       <button id="poll" class="ghost" disabled>Check status</button>
@@ -234,6 +237,7 @@ $("submit").onclick = async () => {
   fd.append("tags", $("p-tags").value.trim());
   fd.append("metadata", $("p-meta").value.trim());
   fd.append("on_conflict", $("p-conflict").value);
+  if ($("p-ttl").value.trim()) fd.append("ttl", $("p-ttl").value.trim());
   fd.append("wait", "0");                       // async: return the job at once
 
   seen = []; jobId = null;

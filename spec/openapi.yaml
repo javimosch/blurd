@@ -171,7 +171,7 @@ paths:
         - { in: query, name: on_conflict, schema: { type: string, enum: [reuse, replace, reject], default: reuse } }
         - { in: query, name: tags, schema: { type: string }, description: "comma separated (raw-body form)" }
         - { in: query, name: metadata, schema: { type: string }, description: "JSON object (raw-body form)" }
-        - { in: query, name: profile, schema: { type: string }, description: "JSON profile overrides" }
+        - { in: query, name: profile, schema: { type: string }, description: "JSON profile overrides; storage.ttl (seconds, 60-2592000) prunes the blob after the deadline" }
         - { in: query, name: force, schema: { type: string }, description: "1 to bypass the cache" }
       requestBody:
         content:
@@ -235,7 +235,10 @@ paths:
       parameters:
         - { in: path, name: sha, required: true, schema: { type: string } }
         - { in: query, name: profile, schema: { type: string } }
-      responses: { "200": { description: "image/jpeg or image/png" }, "404": { description: not found } }
+      responses:
+        "200": { description: "image/jpeg or image/png" }
+        "404": { description: not found }
+        "410": { description: "resource_expired: TTL'd blob was pruned; resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/thumbs/{sha}:
     get:
       summary: Thumbnail for grid views
@@ -293,6 +296,7 @@ paths:
         "200": { description: "image bytes; ETag + Cache-Control set" }
         "304": { description: "If-None-Match matched" }
         "404": { description: "no such external_id" }
+        "410": { description: "resource_expired: TTL'd blob was pruned; resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/thumbs/by-code/{external_id}:
     get:
       summary: Thumbnail by unique code

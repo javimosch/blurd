@@ -6,7 +6,7 @@ nav_order: 2
 
 # Deploying blurd
 
-Every shape below has been run end to end and passes the same 126 black-box
+Every shape below has been run end to end and passes the same 134 black-box
 conformance checks. Where a number appears it was measured, not estimated.
 
 This is the operator's page: *which shape do I want, and what do I type*. The
@@ -29,8 +29,8 @@ All four blob/scale combinations are supported and measured:
 
 | | local blobs | S3 blobs |
 |---|---|---|
-| **one instance** | 126/126 | 126/126 |
-| **several replicas** | 126/126 **on one shared volume** | 126/126 |
+| **one instance** | 134/134 | 134/134 |
+| **several replicas** | 134/134 **on one shared volume** | 134/134 |
 
 The only configuration that fails is several replicas with **a volume each** —
 see [What breaks, and how it looks](#6-what-breaks-and-how-it-looks).
@@ -63,13 +63,23 @@ docker run -d --name blurd \
   -e BLURD_PULL_MODELS=1 \
   -e BLURD_DASHBOARD_PASSWORD=change-me \
   -v blurd-home:/var/lib/blurd \
-  blurd:0.16.0
+  blurd:0.17.0
 ```
 
 With Compose, which adds MinIO and puts the blobs in it:
 
 ```bash
 docker compose up -d
+```
+
+For a single-instance deploy with **no MinIO** — everything (SQLite, blobs,
+models) on one named volume, e.g. a Coolify demo. This file also starts the
+demo **sidecar UI on :8790** (a bootstrap container first registers the demo
+API key it carries) and defaults dashboard login + key-creation step-up to
+`blurd-demo`:
+
+```bash
+docker compose -f docker-compose-local.yml up -d --build
 ```
 
 **Everything in `BLURD_HOME` matters here** — it holds the database, the blobs
@@ -83,7 +93,7 @@ Two things must become shared: the metadata store, and the blobs.
 
 ### Metadata: Postgres or MongoDB
 
-Both pass the same 126 checks, plus a 77-check suite that runs them side by side
+Both pass the same 134 checks, plus a 77-check suite that runs them side by side
 and asserts they answer *identically*. **Postgres is the recommendation**;
 MongoDB exists so a shop that already operates MongoDB does not have to become a
 Postgres shop. It is an operations argument, not a performance one.
@@ -121,7 +131,7 @@ nothing to size. Blobs are ~95% of the stored bytes (~333 kB per image against
 **~360 GB per million images to ~19 GB**.
 
 If you already have a ReadWriteMany volume and would rather not run object
-storage, `local` on **one shared volume** works — measured at 126/126 with three
+storage, `local` on **one shared volume** works — measured at 134/134 with three
 replicas behind a load balancer, serving byte-identical blobs from a replica
 that never processed the image.
 

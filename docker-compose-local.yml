@@ -1,0 +1,72 @@
+# blurd — the simplest real deployment: one container, one volume, no
+# object storage. SQLite metadata + local blobs + models all live on the
+# single named volume, so `docker compose -f docker-compose-local.yml down`
+# loses nothing and `up` again finds the same home.
+#
+# ⚠  Demo-grade: the dashboard password AND the key-creation step-up default
+#    to `blurd-demo` (overridable via env). Change both before exposing this
+#    anywhere real. Single replica only: SQLite is a single-writer file.
+#
+#   docker compose -f docker-compose-local.yml up -d --build
+#   docker compose -f docker-compose-local.yml exec blurd python3 run.py keys add my-app
+#
+# Brings up THREE containers: bootstrap (one-shot key registration), blurd
+# itself, and the demo sidecar UI on :8790 (browser talks only to the
+# sidecar; the API key never leaves that container).
+#
+# Coolify: "Docker Compose" build pack, this file, expose ports 8770 and 8790.
+
+services:
+  # One-shot: registers the demo API key the sidecar carries, BEFORE blurd
+  # starts — SQLite is a single-writer home, so this must not run beside a
+  # live daemon. Exit 94 (key already present) is success on re-up.
+  bootstrap:
+    build: .
+    image: blurd:0.18.0
+    entrypoint: ["sh", "-c"]
+    command:
+      - python3 run.py keys add sidecar --key "$$BLURD_DEMO_API_KEY" || test $$? -eq 94
+    environment:
+      BLURD_DEMO_API_KEY: ${BLURD_DEMO_API_KEY:-blk_demo_change_me_0123456789abcdef}
+    volumes: ["blurd-data:/var/lib/blurd"]
+    restart: "no"
+
+  blurd:
+    build: .
+    image: blurd:0.18.0
+    stop_grace_period: 40s
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+    environment:
+      # local blobs + sqlite are the defaults; stated anyway so the file
+      # reads as complete and a pasted BLURD_* from elsewhere cannot surprise.
+      BLURD_STORAGE_BACKEND: local
+      BLURD_DB_BACKEND: sqlite
+      BLURD_PULL_MODELS: "1"                 # fetch the two ONNX models at boot
+      # Demo defaults so `up -d` works with zero env: dashboard login AND the
+      # key-creation step-up share one password. Both are overridable from
+      # Coolify / a .env — do NOT keep the default anywhere public.
+      BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD:-blurd-demo}
+      BLURD_DASHBOARD_KEY_SECRET: ${BLURD_DASHBOARD_KEY_SECRET:-${BLURD_DASHBOARD_PASSWORD:-blurd-demo}}
+      BLURD_DRAIN_SECONDS: ${BLURD_DRAIN_SECONDS:-20}
+    ports: ["8770:8770"]
+    volumes: ["blurd-data:/var/lib/blurd"]   # db + blobs + models + config
+    restart: unless-stopped
+
+  # The stand-in producer/consumer app: the browser talks only to the
+  # sidecar, the blurd API key never leaves this container.
+  sidecar:
+    build: ./sidecar
+    image: blurd-sidecar:0.17.0
+    environment:
+      SIDECAR_HOST: 0.0.0.0                  # loopback bind cannot be reached through a port mapping
+      BLURD_URL: http://blurd:8770
+      BLURD_API_KEY: ${BLURD_DEMO_API_KEY:-blk_demo_change_me_0123456789abcdef}
+      BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD:-blurd-demo}
+    ports: ["8790:8790"]
+    depends_on:
+      blurd: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  blurd-data:

@@ -392,11 +392,28 @@ def delete_artifact(conn, artifact_id: int) -> None:
 
 def artifact_blob_paths(conn, sha: str) -> List[str]:
     return [d["blob_path"] for d in
-            conn.db["artifacts"].find({"source_sha": sha}, {"blob_path": 1})]
+            conn.db["artifacts"].find(
+                {"source_sha": sha, "blob_path": {"$ne": ""}}, {"blob_path": 1})]
 
 
 def all_blob_paths(conn) -> List[str]:
-    return [d["blob_path"] for d in conn.db["artifacts"].find({}, {"blob_path": 1})]
+    return [d["blob_path"] for d in conn.db["artifacts"].find(
+        {"blob_path": {"$ne": ""}}, {"blob_path": 1})]
+
+
+def expired_blobs(conn, limit: int = 200) -> List[dict]:
+    """Artifacts past their TTL whose object may still be in the store."""
+    cur = conn.db["artifacts"].find(
+        {"expires_at": {"$ne": None, "$lt": now()}, "blob_path": {"$ne": ""}},
+        {"blob_path": 1}).limit(limit)
+    return [{"id": d["_id"], "blob_path": d["blob_path"]} for d in cur]
+
+
+def expire_artifact(conn, artifact_id: int) -> None:
+    """TTL passed: drop the blob reference and thumbnail; keep the record."""
+    conn.db["artifacts"].update_one({"_id": int(artifact_id)},
+                                    {"$set": {"blob_path": ""}})
+    conn.db["thumbs"].delete_one({"_id": int(artifact_id)})
 
 
 def has_legacy_thumb_column(conn) -> bool:
@@ -416,12 +433,14 @@ def thumb_for(conn, sha: str, profile: str = None):
     if profile:
         q["profile_hash"] = profile
     art = conn.db["artifacts"].find_one(
-        q, {"blob_sha": 1, "source_sha": 1}, sort=[("created_at", -1)])
+        q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1},
+        sort=[("created_at", -1)])
     if not art:
         return None
     t = conn.db["thumbs"].find_one({"_id": art["_id"]})
     return {"thumb": (bytes(t["jpeg"]) if t and t.get("jpeg") is not None else None),
-            "blob_sha": art.get("blob_sha"), "source_sha": art.get("source_sha")}
+            "blob_sha": art.get("blob_sha"), "source_sha": art.get("source_sha"),
+            "expires_at": art.get("expires_at"), "id": art["_id"]}
 
 
 def blob_ref(conn, sha: str, profile: str = None):
@@ -429,9 +448,9 @@ def blob_ref(conn, sha: str, profile: str = None):
     if profile:
         q["profile_hash"] = profile
     doc = conn.db["artifacts"].find_one(
-        q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1},
-        sort=[("created_at", -1)])
-    return _row(doc)
+        q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
+            "expires_at": 1}, sort=[("created_at", -1)])
+    return _row(doc, "id")
 
 
 def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
@@ -452,11 +471,12 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
     if profile:
         aq["profile_hash"] = profile
     art = conn.db["artifacts"].find_one(
-        aq, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1},
-        sort=[("created_at", -1)])
+        aq, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
+             "expires_at": 1}, sort=[("created_at", -1)])
     if not art:
         return None
     out = _row(art)
+    out["id"] = art["_id"]
     out["thumb"] = None
     if with_thumb:
         t = conn.db["thumbs"].find_one({"_id": art["_id"]})
