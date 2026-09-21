@@ -223,7 +223,7 @@ always available, creation is off by default behind a second secret.
 Async jobs, unique codes as a primary key, and a sidecar standing in for the
 producer and consumer applications.
 
-## Unreleased
+## 0.20.0
 
 **Public blob rules + rate limiting.** The dashboard gains a `public` tab where
 an admin declares read rules -- one tag, or one metadata `k=v`, optionally
