@@ -7,8 +7,10 @@ The source image is never written to disk. Only sha256(source bytes), the
 dimensions, and the redacted output are persisted.
 """
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -282,6 +284,57 @@ def _blob_location(cfg: Config, rel: str) -> str:
         f"s3://{blobs.bucket}/{blobs._key(rel)}"
 
 
+def _manual_regions(row) -> list:
+    """SQL stores regions as TEXT; mongo stores the list natively."""
+    mr = row["manual_regions"] if "manual_regions" in row.keys() else []
+    return json.loads(mr) if isinstance(mr, str) else (mr or [])
+
+
+def apply_regions(cfg: Config, conn, row, regions: List[dict]) -> Dict[str, Any]:
+    """Composite operator-drawn black shapes onto the STORED redacted blob.
+
+    The source is gone by design, so this can only ever remove information --
+    a manual region can mask more, never reveal. Rewrites the blob in place
+    (same rel path), regenerates the thumbnail, and clears needs_review: a
+    human has reviewed this artifact.
+    """
+    blobs = store.build(cfg)
+    if not regions:
+        # Clearing the region list cannot restore pixels already burned into
+        # the stored blob -- the source is gone. Skip the re-encode entirely:
+        # just record the empty list and mark the artifact reviewed.
+        db.apply_manual_regions(conn, row["id"], regions=[],
+                                blob_sha=row["blob_sha"],
+                                blob_size=row["blob_size"], thumb=None)
+        return {"manual_regions": [], "needs_review": False,
+                "blob_sha": row["blob_sha"], "bytes": row["blob_size"]}
+    blob = blobs.get(row["blob_path"])
+    img = decode(blob, int(cfg.get("fetch.max_pixels", 50_000_000)))
+    h, w = img.shape[:2]
+    for r in regions:
+        x, y = int(r["x"] * w), int(r["y"] * h)
+        rw, rh = max(1, int(r["w"] * w)), max(1, int(r["h"] * h))
+        if r["shape"] == "ellipse":
+            cv2.ellipse(img, (x + rw // 2, y + rh // 2), (rw // 2, rh // 2),
+                        0, 0, 360, (0, 0, 0), -1)
+        else:
+            cv2.rectangle(img, (x, y), (x + rw, y + rh), (0, 0, 0), -1)
+    # Re-encode with the artifact's own output profile so format and quality
+    # match what the pipeline wrote originally.
+    profile = json.loads(row["profile_json"]) if "profile_json" in row.keys() \
+        else cfg.resolve_profile(None)
+    new_blob, new_mime, _ = encode(img, profile["output"])
+    thumb = _thumb(img)
+    img = None
+    # Object first, row second -- same ordering rule as process().
+    blobs.put(row["blob_path"], new_blob, new_mime)
+    db.apply_manual_regions(conn, row["id"], regions=regions,
+                            blob_sha=sha256_hex(new_blob),
+                            blob_size=len(new_blob), thumb=thumb)
+    return {"manual_regions": regions, "needs_review": False,
+            "blob_sha": sha256_hex(new_blob), "bytes": len(new_blob)}
+
+
 def artifact_result(cfg: Config, conn, row, cached: bool,
                     tenant: str = None) -> Dict[str, Any]:
     """`tenant=None` means an unrestricted reader: show every label. A scoped
@@ -309,6 +362,7 @@ def artifact_result(cfg: Config, conn, row, cached: bool,
         "tags": db.tags_of(conn, sha, tenant),
         "metadata": db.metadata_of(conn, sha, tenant),
         "detections": db.detections_of(conn, row["id"]),
+        "manual_regions": _manual_regions(row),
         "stats": _json.loads(row["stats_json"]),
         "created_at": row["created_at"],
         "expires_at": (row["expires_at"] if "expires_at" in row.keys()

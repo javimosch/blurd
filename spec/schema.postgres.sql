@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   min_score     DOUBLE PRECISION,                     -- lowest accepted detection score
   needs_review  INTEGER NOT NULL DEFAULT 0,
   stats_json    TEXT NOT NULL,            -- timings breakdown + model versions
+  manual_regions TEXT NOT NULL DEFAULT '[]', -- operator-drawn boxes, normalized coords
   created_at    TEXT NOT NULL,
   expires_at    TEXT,                     -- NULL = kept forever
   UNIQUE (source_sha, profile_hash)

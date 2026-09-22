@@ -212,6 +212,9 @@ async function openDetail(sha, profile) {
     <div class="kv">${d.detections.map((x) =>
       `<span class="pill ${x.cls}">${x.cls}</span><span>${x.score.toFixed(3)} @ [${
         x.box.join(", ")}] · ${esc(x.detector)}</span>`).join("")}</div>
+    <h3>manual regions (${(d.manual_regions || []).length})</h3>
+    <div>${(d.manual_regions || []).map((r) =>
+      `<span class="pill">${r.shape}</span>`).join("") || "—"}</div>
     <h3>unique codes</h3>
     <div>${(d.codes || []).map((c) => `<span class="pill">${esc(c)}</span>`).join("") || "—"}</div>
     <h3>tags</h3>
@@ -222,8 +225,10 @@ async function openDetail(sha, profile) {
     <pre>${esc(JSON.stringify(d.stats, null, 2))}</pre>
     <h3>actions</h3>
     <button class="ghost" id="dl">download</button>
+    <button class="ghost" id="redact">manual redact</button>
     <button class="danger" id="del">delete</button>`;
   $("dl").onclick = () => window.open(`/ui-api/blobs/${sha}?profile=${profile}`, "_blank");
+  $("redact").onclick = () => startRedact(sha, profile, d);
   $("del").onclick = async () => {
     if (!confirm("Delete this image, all its artifacts and blobs?")) return;
     await api(`/images/${sha}`, { method: "DELETE" });
@@ -232,7 +237,108 @@ async function openDetail(sha, profile) {
   $("modal").hidden = false;
 }
 
-function closeModal() { $("modal").hidden = true; $("m-img").src = ""; }
+function closeModal() {
+  $("modal").hidden = true; $("m-img").src = "";
+  $("m-img").hidden = false; $("m-canvas").hidden = true;
+  $("m-redact-bar").hidden = true;
+}
+
+// Manual redaction: draw black shapes onto the STORED redacted blob. The
+// original is gone, so this can only ever remove information.
+const redact = { regions: [], shape: "rect", img: null, drag: null, on: false };
+
+function startRedact(sha, profile, d) {
+  redact.on = true;
+  redact.regions = (d.manual_regions || []).map((r) => ({ ...r }));
+  redact.drag = null;
+  const cv = $("m-canvas"), img = $("m-img"), bar = $("m-redact-bar");
+  const src = `/ui-api/blobs/${sha}?profile=${profile}&v=${d.blob ? d.blob.sha256 : Date.now()}`;
+  const el = new Image();
+  el.onload = () => {
+    redact.img = el;
+    const scale = Math.min(1, 720 / el.naturalWidth);
+    cv.width = el.naturalWidth * scale;
+    cv.height = el.naturalHeight * scale;
+    img.hidden = true; bar.hidden = false; cv.hidden = false;
+    drawRedact();
+  };
+  el.src = src;
+  const save = async (regions) => {
+    await api(`/images/${sha}/regions?profile=${profile}`,
+              { method: "PUT", body: JSON.stringify({ regions }) });
+    stopRedact(); openDetail(sha, profile); load(); loadStats();
+  };
+  $("r-save").onclick = () => save(redact.regions);
+  $("r-reviewed").onclick = () => save([]);
+  $("r-clear").onclick = () => { redact.regions = []; drawRedact(); };
+  $("r-cancel").onclick = stopRedact;
+  $("r-rect").onclick = () => setShape("rect");
+  $("r-ellipse").onclick = () => setShape("ellipse");
+  setShape(redact.shape);
+}
+
+function setShape(s) {
+  redact.shape = s;
+  $("r-rect").classList.toggle("active", s === "rect");
+  $("r-ellipse").classList.toggle("active", s === "ellipse");
+}
+
+function stopRedact() {
+  redact.on = false; redact.img = null; redact.drag = null;
+  $("m-canvas").hidden = true; $("m-redact-bar").hidden = true;
+  $("m-img").hidden = false;
+}
+
+function drawRedact() {
+  const cv = $("m-canvas"), ctx = cv.getContext("2d");
+  ctx.drawImage(redact.img, 0, 0, cv.width, cv.height);
+  ctx.strokeStyle = "#22c55e"; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+  const all = redact.drag ? redact.regions.concat([redact.drag]) : redact.regions;
+  for (const r of all) {
+    const x = r.x * cv.width, y = r.y * cv.height,
+          w = r.w * cv.width, h = r.h * cv.height;
+    if (r.shape === "ellipse") {
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, 2 * Math.PI);
+      ctx.stroke();
+    } else ctx.strokeRect(x, y, w, h);
+  }
+}
+
+$("m-canvas").addEventListener("mousedown", (e) => {
+  if (!redact.on) return;
+  const cv = $("m-canvas"), b = cv.getBoundingClientRect();
+  const nx = (e.clientX - b.left) / b.width, ny = (e.clientY - b.top) / b.height;
+  // Click (no drag) on an existing region deletes it, topmost first.
+  const hit = [...redact.regions].reverse().find((r) => {
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    return r.shape === "ellipse"
+      ? (((nx - cx) / (r.w / 2)) ** 2 + ((ny - cy) / (r.h / 2)) ** 2) <= 1
+      : (nx >= r.x && nx <= r.x + r.w && ny >= r.y && ny <= r.y + r.h);
+  });
+  redact.drag = { shape: redact.shape, sx: nx, sy: ny,
+                  x: nx, y: ny, w: 0, h: 0, _hit: hit };
+});
+$("m-canvas").addEventListener("mousemove", (e) => {
+  if (!redact.on || !redact.drag) return;
+  const cv = $("m-canvas"), b = cv.getBoundingClientRect();
+  const nx = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width));
+  const ny = Math.max(0, Math.min(1, (e.clientY - b.top) / b.height));
+  const d = redact.drag;
+  d.x = Math.min(d.sx, nx); d.y = Math.min(d.sy, ny);
+  d.w = Math.abs(nx - d.sx); d.h = Math.abs(ny - d.sy);
+  drawRedact();
+});
+$("m-canvas").addEventListener("mouseup", (e) => {
+  if (!redact.on || !redact.drag) return;
+  const d = redact.drag; redact.drag = null;
+  if (d.w < 0.01 && d.h < 0.01) {          // treated as a click
+    if (d._hit) redact.regions = redact.regions.filter((r) => r !== d._hit);
+  } else {
+    redact.regions.push({ shape: d.shape, x: d.x, y: d.y, w: d.w, h: d.h });
+  }
+  drawRedact();
+});
 
 function jobQuery() {
   const q = new URLSearchParams();

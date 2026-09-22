@@ -471,6 +471,41 @@ def main():
               bool(evs) and evs[0].get("detail", {}).get("blocked", 0) >= 5,
               f"{len(evs)} events")
 
+        print("\n-- manual redaction regions (dashboard)")
+        s, b, _ = http(f"{a.url}/v1/blobs/{sha}", key=a.api_key)
+        before = b
+        regs = [{"shape": "rect", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+                {"shape": "ellipse", "x": 0.5, "y": 0.5, "w": 0.2, "h": 0.1}]
+        s, b, _ = http_raw(f"{a.url}/ui-api/images/{sha}/regions",
+                           method="PUT", headers=authed,
+                           body=json.dumps({"regions": regs}).encode())
+        check("PUT regions is 200", s == 200, f"got {s} {b[:120]}")
+        s, b, _ = http(f"{a.url}/v1/blobs/{sha}", key=a.api_key)
+        check("manual regions change the stored blob", b != before)
+        s, b, _ = http(f"{a.url}/v1/images/{sha}", key=a.api_key)
+        rec = json.loads(b)["data"]
+        check("record carries manual_regions",
+              len(rec.get("manual_regions", [])) == 2,
+              str(rec.get("manual_regions")))
+        check("manual save clears needs_review",
+              rec.get("needs_review") is False)
+        s, b, _ = http_raw(f"{a.url}/ui-api/images/{sha}/regions",
+                           method="PUT", headers=authed,
+                           body=b'{"regions":[{"shape":"x","x":0,"y":0,"w":1,"h":1}]}')
+        check("a bad shape is a typed validation_error",
+              s == 422 and b"validation_error" in b, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/images/{sha}/regions",
+                           method="PUT", headers=authed,
+                           body=b'{"regions":[]}')
+        check("empty region list still clears review (mark reviewed)",
+              s == 200, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/images/{sha}/regions",
+                           method="PUT",
+                           headers={"Authorization": basic},
+                           body=b'{"regions":[]}')
+        check("regions PUT without CSRF is refused", s in (401, 403),
+              f"got {s}")
+
     print("\n-- concurrent dedup race")
     # Two workers processing the same (source_sha, profile_hash) must both end
     # `done` -- the loser resolves to the winner's artifact, not a 500 on the

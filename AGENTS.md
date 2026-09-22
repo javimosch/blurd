@@ -277,3 +277,14 @@ never leaves that process.
     so an orchestrator cannot lock itself out. Blocked hits flush to `audit`
     as ONE row per (class, ip, window) — grouped, not per-request. Audit rows
     (including these events) are pruned past 30 days in the reaper sweep.
+48. **Manual redaction regions are additive masks, never a re-edit.** The
+    source is gone (rule 1), so `PUT /ui-api/images/<sha>/regions` composites
+    black shapes onto the stored blob and re-encodes it in place — a region
+    can only remove information, never reveal it. Clearing the list is "mark
+    reviewed", not "undo": burned pixels cannot be restored. The re-encode
+    follows the same ordering as `process()` — object before row.
+49. **`blurd_pro` is the only commercial extension point.** `src/plugins.py`
+    loads it if importable and hands it `server.extra_routes` for non-`/v1`
+    paths. OSS code must never import plugin internals, and the core feature
+    set must stay complete without it — the seam exists so pro work does not
+    fork the dashboard or the dispatch chain.

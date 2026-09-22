@@ -383,6 +383,7 @@ def insert_artifact(conn, row: dict, dets: List[dict]) -> Optional[int]:
          "detector": d["detector"]} for d in dets]
     doc["img"] = _image_projection(conn, row["source_sha"])
     doc["lbl"] = []
+    doc.setdefault("manual_regions", [])
     try:
         conn.db["artifacts"].insert_one(doc)
     except Exception as exc:
@@ -509,6 +510,29 @@ def blob_ref(conn, sha: str, profile: str = None):
         q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
             "expires_at": 1}).sort("created_at", -1).limit(8))
     return _row(doc, "id")
+
+
+def artifact_for_sha(conn, sha: str, profile: str = None):
+    """The artifact a sha-level read resolves to (live-first), with the
+    fields a manual-region edit needs."""
+    q: Dict[str, Any] = {"source_sha": sha}
+    if profile:
+        q["profile_hash"] = profile
+    doc = _live_first(conn.db["artifacts"].find(q).sort("created_at", -1).limit(8))
+    return _row(doc, "id")
+
+
+def apply_manual_regions(conn, artifact_id: int, *, regions: List[dict],
+                         blob_sha: str, blob_size: int, thumb: bytes = None):
+    """Persist operator-drawn regions plus the re-encoded blob's identity, and
+    clear needs_review -- a human has looked at this artifact now."""
+    conn.db["artifacts"].update_one(
+        {"_id": int(artifact_id)},
+        {"$set": {"manual_regions": regions, "blob_sha": blob_sha,
+                  "blob_size": int(blob_size), "needs_review": 0}})
+    if thumb:
+        conn.db["thumbs"].update_one(
+            {"_id": int(artifact_id)}, {"$set": {"jpeg": thumb}}, upsert=True)
 
 
 def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,

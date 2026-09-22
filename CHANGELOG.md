@@ -4,6 +4,70 @@ blurd was developed privately and is published here from 0.16.0. This is the
 condensed history — it keeps the decisions and the measurements, because several
 of them are the reason the code looks the way it does.
 
+## Unreleased
+
+**Manual redaction regions.** The review loop is now complete: a `needs_review`
+image can be opened in the dashboard, black rects/ellipses drawn over whatever
+the detectors missed, and saved. Because blurd never stores the source, manual
+regions are *additive masks* composited onto the stored redacted blob — a region
+can only ever remove information, never reveal it. The blob is re-encoded in
+place with the artifact's own output profile, the thumbnail regenerated, the
+object written before the row (same ordering as `process()`), `needs_review`
+cleared, and the save audit-logged. Regions are normalized 0–1 coords
+(`manual_regions` on the artifact record, additive field); an empty list is
+"mark reviewed" and skips the re-encode — burned pixels cannot be restored.
+`PUT /ui-api/images/<sha>/regions` is dashboard-auth + CSRF only, not an API
+route. Six new conformance checks; identical on all three backends.
+
+**Plugin seam.** `src/plugins.py`: if a `blurd_pro` package is importable,
+`serve` calls its `install(server)` once at startup; the plugin registers
+handlers on `server.extra_routes` (`(method, path-prefix) -> fn`), which get
+first pick of the non-`/v1` path space. OSS code never imports plugin
+internals; nothing is required for blurd to run without it. This is where
+commercial extensions (SSO, etc.) will live.
+
+## 0.20.0
+
+**Public blob rules + rate limiting.** The dashboard gains a `public` tab where
+an admin declares read rules -- one tag, or one metadata `k=v`, optionally
+bound to a tenant. `GET /pub/blobs/<sha>` then serves matching redacted images
+with no API key; the URL is sha-addressed only (codes are enumerable, a sha256
+is not) and rules are evaluated per request so deletion revokes immediately.
+All endpoints are now rate-limited per IP: 60/min on `/pub/*`, 300/min
+elsewhere, 429 `rate_limited` with `retry_after` on excess. Blocked bursts
+flush to the audit log as one grouped row per window, surfaced in the public
+tab and the audit trail. Audit rows are pruned past 30 days so a long-lived
+instance does not grow its home on traffic alone.
+
+**Dedup race fixed.** Two workers processing the same
+`(source_sha, profile_hash)` both reached the artifact insert, and the loser
+died on the unique constraint (seen as `internal_error` jobs in a 1k-image
+real-data batch). `insert_artifact` now returns None on the conflict -- the
+SQL path wraps the insert in a SAVEPOINT so Postgres keeps the transaction
+valid -- and the pipeline resolves to the winner's row as a cache hit. Two
+more of the same shape fixed alongside: the local store's `.part` temp file
+was shared between racing writers (second rename failed ENOENT; the name is
+now per-writer), and Mongo's `(source_sha, profile_hash)` index was not
+unique, so it enforced nothing -- `init` now upgrades it in place.
+
+**Blob storage cap.** `storage.max_bytes` (default 0 = unlimited,
+`BLURD_STORAGE_MAX_BYTES`) bounds the bytes held by live redacted blobs --
+counted from `artifacts.blob_size`, so it works identically on local and s3
+storage. When a write would exceed the cap, overdue TTL blobs are reclaimed
+first; if it still does not fit the job fails with 507 `storage_full`
+(recoverable, `retry_after`). Thumbnails and metadata stay outside the
+budget. `/v1/stats` gains `bytes_live` and `storage_max_bytes` on the
+unrestricted view. For demo boxes and shared VMs where disk exhaustion is
+the failure to prevent.
+
+**Job listing gains `sha` + `tag` filters.** `GET /v1/jobs` (and the jobs
+dashboard tab) now filter by `sha` -- a `source_sha` prefix served by
+`idx_jobs_sha` -- and by `tag`, a quoted-substring match on the job's
+`tags_json` submission snapshot. The tag filter answers "the jobs of batch X"
+without joining the live labels tables; it is intentionally a snapshot, not
+live labels. Both are additive parameters, identical across sqlite/pg/mongo,
+and the jobs tab resets keyset pagination when they change.
+
 ## 0.19.0
 
 **TTL profile binding.** `external_ids` now records the `profile_hash` a code
@@ -222,45 +286,3 @@ always available, creation is off by default behind a second secret.
 
 Async jobs, unique codes as a primary key, and a sidecar standing in for the
 producer and consumer applications.
-
-## 0.20.0
-
-**Public blob rules + rate limiting.** The dashboard gains a `public` tab where
-an admin declares read rules -- one tag, or one metadata `k=v`, optionally
-bound to a tenant. `GET /pub/blobs/<sha>` then serves matching redacted images
-with no API key; the URL is sha-addressed only (codes are enumerable, a sha256
-is not) and rules are evaluated per request so deletion revokes immediately.
-All endpoints are now rate-limited per IP: 60/min on `/pub/*`, 300/min
-elsewhere, 429 `rate_limited` with `retry_after` on excess. Blocked bursts
-flush to the audit log as one grouped row per window, surfaced in the public
-tab and the audit trail. Audit rows are pruned past 30 days so a long-lived
-instance does not grow its home on traffic alone.
-
-**Dedup race fixed.** Two workers processing the same
-`(source_sha, profile_hash)` both reached the artifact insert, and the loser
-died on the unique constraint (seen as `internal_error` jobs in a 1k-image
-real-data batch). `insert_artifact` now returns None on the conflict -- the
-SQL path wraps the insert in a SAVEPOINT so Postgres keeps the transaction
-valid -- and the pipeline resolves to the winner's row as a cache hit. Two
-more of the same shape fixed alongside: the local store's `.part` temp file
-was shared between racing writers (second rename failed ENOENT; the name is
-now per-writer), and Mongo's `(source_sha, profile_hash)` index was not
-unique, so it enforced nothing -- `init` now upgrades it in place.
-
-**Blob storage cap.** `storage.max_bytes` (default 0 = unlimited,
-`BLURD_STORAGE_MAX_BYTES`) bounds the bytes held by live redacted blobs --
-counted from `artifacts.blob_size`, so it works identically on local and s3
-storage. When a write would exceed the cap, overdue TTL blobs are reclaimed
-first; if it still does not fit the job fails with 507 `storage_full`
-(recoverable, `retry_after`). Thumbnails and metadata stay outside the
-budget. `/v1/stats` gains `bytes_live` and `storage_max_bytes` on the
-unrestricted view. For demo boxes and shared VMs where disk exhaustion is
-the failure to prevent.
-
-**Job listing gains `sha` + `tag` filters.** `GET /v1/jobs` (and the jobs
-dashboard tab) now filter by `sha` -- a `source_sha` prefix served by
-`idx_jobs_sha` -- and by `tag`, a quoted-substring match on the job's
-`tags_json` submission snapshot. The tag filter answers "the jobs of batch X"
-without joining the live labels tables; it is intentionally a snapshot, not
-live labels. Both are additive parameters, identical across sqlite/pg/mongo,
-and the jobs tab resets keyset pagination when they change.

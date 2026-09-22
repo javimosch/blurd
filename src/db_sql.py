@@ -85,6 +85,8 @@ def migrate(conn) -> None:
                      "ON artifacts(expires_at)")
     if "external_ids" in tables and "profile_hash" not in _columns(conn, "external_ids"):
         conn.execute("ALTER TABLE external_ids ADD COLUMN profile_hash TEXT")
+    if "artifacts" in tables and "manual_regions" not in _columns(conn, "artifacts"):
+        conn.execute("ALTER TABLE artifacts ADD COLUMN manual_regions TEXT NOT NULL DEFAULT '[]'")
 
     # The thumbnail move is LAZY, on purpose. Copying every blob into the new
     # table and dropping the column rewrites the whole of `artifacts` in one
@@ -430,6 +432,35 @@ def blob_ref(conn, sha: str, profile: str = None):
         args.append(profile)
     sql, args = _live_first(sql, args)
     return conn.execute(sql, args).fetchone()
+
+
+def artifact_for_sha(conn, sha: str, profile: str = None):
+    """The artifact a sha-level read resolves to (live-first), with the
+    fields a manual-region edit needs."""
+    sql = ("SELECT a.id, a.source_sha, a.profile_hash, a.profile_json,"
+           " a.blob_path, a.blob_sha,"
+           " a.blob_size, a.mime, a.needs_review, a.manual_regions, a.expires_at"
+           " FROM artifacts a WHERE a.source_sha=?")
+    args = [sha]
+    if profile:
+        sql += " AND a.profile_hash=?"
+        args.append(profile)
+    sql, args = _live_first(sql, args)
+    return conn.execute(sql, args).fetchone()
+
+
+def apply_manual_regions(conn, artifact_id: int, *, regions: List[dict],
+                         blob_sha: str, blob_size: int, thumb: bytes = None):
+    """Persist operator-drawn regions plus the re-encoded blob's identity, and
+    clear needs_review -- a human has looked at this artifact now."""
+    conn.execute(
+        "UPDATE artifacts SET manual_regions=?, blob_sha=?, blob_size=?,"
+        " needs_review=0 WHERE id=?",
+        (json.dumps(regions), blob_sha, blob_size, int(artifact_id)))
+    if thumb:
+        conn.execute("INSERT INTO thumbs (artifact_id, jpeg) VALUES (?,?)"
+                     " ON CONFLICT (artifact_id) DO UPDATE SET jpeg=excluded.jpeg",
+                     (int(artifact_id), thumb))
 
 
 def query_artifacts(conn, *, tag=None, meta=None, sha=None, needs_review=None,

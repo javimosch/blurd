@@ -276,7 +276,11 @@ because they crop tight, and EXIF — including GPS — is dropped on write.
 
 **Recall is not 100%.** Artifacts with no detections, or with any detection
 below 0.55 confidence, are flagged `needs_review` and filterable in the
-dashboard. Treat blurd as a strong first pass, not a guarantee.
+dashboard — where a human can draw additional black rects/ellipses over what
+the detectors missed. Manual regions are composited onto the stored redacted
+blob (the source is gone, so they can only ever mask more, never reveal) and
+saving clears the review flag. Treat blurd as a strong first pass, not a
+guarantee.
 
 ## Capacity
 

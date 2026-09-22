@@ -116,3 +116,7 @@ pre{background:#0b0d10;border:1px solid var(--line);border-radius:var(--radius);
 .pill.tag{cursor:pointer}
 .pill.tag:hover{border-color:var(--accent);color:var(--accent)}
 .pill.warn{border-color:var(--warn);color:var(--warn)}
+.modal-img{position:relative;flex-direction:column}
+#m-canvas{max-width:100%;max-height:68vh;cursor:crosshair}
+#m-redact-bar{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+#m-redact-bar button.active{outline:1px solid var(--accent,#22c55e)}

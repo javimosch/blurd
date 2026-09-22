@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, auth, db, jobs as jobs_mod, scope as scope_mod
+from . import __version__, auth, db, jobs as jobs_mod, pipeline, plugins, scope as scope_mod
 from .client import LocalClient
 from .config import Config
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
@@ -160,6 +160,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- dispatch -------------------------------------------------------------
     def do_GET(self):    self._dispatch("GET")
     def do_POST(self):   self._dispatch("POST")
+    def do_PUT(self):    self._dispatch("PUT")
     def do_DELETE(self): self._dispatch("DELETE")
     def do_HEAD(self):   self._dispatch("GET")
 
@@ -187,6 +188,11 @@ class Handler(BaseHTTPRequestHandler):
                     retry_after=_RateLimiter.WINDOW)
             if public:
                 return self._pub(method, path)
+            # Plugin routes get first pick of the non-/v1 space (e.g. /pro/...).
+            for (m, prefix), fn in self.server.extra_routes.items():
+                if m == method and path.startswith(prefix):
+                    if fn(self):
+                        return
             if path.startswith("/v1/"):
                 return self._api(method, path)
             return self._ui(method, path)
@@ -618,6 +624,21 @@ class Handler(BaseHTTPRequestHandler):
                 conn, None, limit=100)})
         if sub.rstrip("/") == "/jobs":
             return self._send(200, {"ok": True, "data": client.jobs(**_job_filters(q))})
+        m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/regions$", sub)
+        if m and self.command == "PUT":
+            payload = json.loads(self._body() or b"{}")
+            sha = m.group("sha")
+            art = db.artifact_for_sha(conn, sha, self._one(q, "profile"))
+            if not art:
+                raise NotFound("image", sha)
+            if not art["blob_path"] or db.artifact_expired(art):
+                raise Expired("blob", sha)
+            out = pipeline.apply_regions(cfg, conn, art,
+                                         _regions(payload.get("regions")))
+            db.audit(conn, "dashboard", "image.manual_regions", sha,
+                     self.address_string(), {"count": len(out["manual_regions"])})
+            conn.commit()
+            return self._send(200, {"ok": True, "data": out})
         m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})$", sub)
         if m:
             if self.command == "DELETE":
@@ -632,6 +653,31 @@ class Handler(BaseHTTPRequestHandler):
                                      self._one(q, "profile"),
                                      thumb=sub.startswith("/thumbs"))
         raise NotFound("endpoint", sub)
+
+
+def _regions(raw) -> list:
+    """Validate operator-drawn redaction regions: normalized coords on the
+    blob as served, {shape: rect|ellipse, x, y, w, h} in [0,1]."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > 200:
+        raise ValidationError("regions must be a list of at most 200 items")
+    out = []
+    for r in raw:
+        try:
+            shape = r["shape"]
+            x, y, w, h = (float(r[k]) for k in ("x", "y", "w", "h"))
+        except (KeyError, TypeError, ValueError):
+            raise ValidationError("each region needs shape, x, y, w, h")
+        if shape not in ("rect", "ellipse"):
+            raise ValidationError("shape must be rect or ellipse")
+        if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1
+                and x + w <= 1.001 and y + h <= 1.001):
+            raise ValidationError("region coordinates must be within [0,1]")
+        out.append({"shape": shape,
+                    "x": min(x, 1.0), "y": min(y, 1.0),
+                    "w": min(w, 1.0 - x), "h": min(h, 1.0 - y)})
+    return out
 
 
 def _public_rule(conn, payload: dict) -> dict:
@@ -788,6 +834,12 @@ class BlurdServer(BoundedThreadingHTTPServer):
         # Blocked-request events flush to the audit log on each hit; the sweep
         # covers a burst that goes quiet before another request arrives.
         self.blurd_queue.on_sweep = self.blurd_rate.flush
+        # Optional commercial plugin (blurd_pro): registers extra routes on
+        # `extra_routes` -- see src/plugins.py. OSS is complete without it.
+        self.extra_routes: dict = {}
+        self.blurd_plugin = plugins.load(cfg)
+        if self.blurd_plugin is not None:
+            self.blurd_plugin.install(self)
 
     def _register_instance(self):
         """Claim a slot, and refuse to share a SQLite file with a peer.

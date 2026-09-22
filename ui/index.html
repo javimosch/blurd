@@ -93,7 +93,17 @@
   <div class="modal-inner">
     <button id="close" class="close">&times;</button>
     <div class="modal-body">
-      <div class="modal-img"><img id="m-img" alt="redacted image"></div>
+      <div class="modal-img"><img id="m-img" alt="redacted image">
+        <canvas id="m-canvas" hidden></canvas>
+        <div id="m-redact-bar" hidden>
+          <button class="ghost" id="r-rect">rect</button>
+          <button class="ghost" id="r-ellipse">ellipse</button>
+          <button class="ghost" id="r-clear">clear all</button>
+          <button class="ghost" id="r-reviewed">mark reviewed</button>
+          <button id="r-save">save</button>
+          <button class="ghost" id="r-cancel">cancel</button>
+        </div>
+      </div>
       <aside class="modal-meta" id="m-meta"></aside>
     </div>
   </div>
