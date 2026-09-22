@@ -535,8 +535,12 @@ class Handler(BaseHTTPRequestHandler):
                 "error": {"code": 87, "type": "dashboard_disabled",
                           "message": "Dashboard password is not set",
                           "suggestions": ["Run: blurd dashboard-password <password>"]}})
-        if not auth.check_basic(self.headers, srv.blurd_cfg.get("dashboard_user", "admin"),
-                                password):
+        # blurd_dashboard_authed is set by a plugin (blurd_pro sso) that has
+        # already verified the request; basic auth stays the fallback.
+        if not (getattr(self, "blurd_dashboard_authed", False)
+                or auth.check_basic(self.headers,
+                                    srv.blurd_cfg.get("dashboard_user", "admin"),
+                                    password)):
             return self._send(401, {"ok": False, "error": {
                 "code": 107, "type": "auth_failed",
                 "message": "Dashboard authentication required"}},
