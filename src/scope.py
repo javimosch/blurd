@@ -155,5 +155,5 @@ def from_cli(tags: List[str], metas: List[str]) -> Scope:
         if "=" not in item:
             raise ValidationError(f"--scope-meta expects K=V, got '{item}'")
         k, _, v = item.partition("=")
-        meta[k.strip()] = v
+        meta[k.strip()] = v.strip()
     return Scope({"tags": tags or [], "metadata": meta})

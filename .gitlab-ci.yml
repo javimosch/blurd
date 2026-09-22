@@ -1,0 +1,20 @@
+# Unit + structural checks on every MR and branch push.
+# The suites are pure stdlib python — no models, no daemon, no network — so a
+# plain python image suffices. Black-box suites (conformance, parity) stay
+# manual; they need a running daemon and real models.
+unit-tests:
+  stage: test
+  image: python:3.11
+  tags:
+    - cluster-mrs   # shared kubernetes runner; all active runners require a tag
+  variables:
+    CI: "true"
+  script:
+    - pip install --quiet pytest
+    - python -m pytest tests/unit -q
+    - python tests/seam_check.py
+    - python tests/schema_drift.py
+  timeout: 10m
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
