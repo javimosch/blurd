@@ -13,6 +13,7 @@ stored** — only its SHA-256, its dimensions, and the redacted output.
 
 [Deployment guide](deployment.html){: .btn .btn-primary }
 [Source](https://github.com/javimosch/blurd){: .btn }
+[Product page & pro](https://blurd.intrane.fr){: .btn }
 
 ---
 

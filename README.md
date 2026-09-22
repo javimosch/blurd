@@ -12,6 +12,9 @@ reprocessing the same bytes twice.
 > covered by 154 black-box conformance checks, and every performance number is
 > measured rather than estimated. It has not been run in production.
 
+**[blurd.intrane.fr](https://blurd.intrane.fr)** — product page and the
+pro edition (per-company license, SSO/OIDC dashboard login, support).
+
 ---
 
 ## Scope
