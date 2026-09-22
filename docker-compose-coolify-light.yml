@@ -51,7 +51,7 @@ services:
   # already present -- is success on re-up.
   bootstrap:
     build: .
-    image: blurd:0.20.0
+    image: blurd:0.21.0
     entrypoint: ["sh", "-c"]
     command:
       - python3 run.py keys add collector --key "$$BLURD_DEMO_API_KEY" || test $$? -eq 94
@@ -62,7 +62,7 @@ services:
 
   blurd:
     build: .
-    image: blurd:0.20.0
+    image: blurd:0.21.0
     stop_grace_period: 40s
     depends_on:
       minio: {condition: service_healthy}

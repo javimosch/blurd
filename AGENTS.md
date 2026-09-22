@@ -59,7 +59,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Seam guard | `tests/seam_check.py` |
 | Throughput, capacity, scaling | `bench/throughput.py`, `spec/capacity.md` |
 | Listing performance, pagination | `db_sql.py` / `db_mongo.py` (`bulk_labels`, `query_artifacts`), `spec/scaling.md` |
-| Black-box conformance (154 checks) | `tests/conformance.py` |
+| Black-box conformance (162 checks) | `tests/conformance.py` |
 | Two backends must answer identically (77 checks) | `tests/backend_parity.py` |
 | Queue backpressure and the byte bound | `tests/queue_bytes.py` |
 | **How to deploy anything** (the operator hub) | `docs/deployment.md` |
@@ -255,7 +255,7 @@ python3 bench/throughput.py --url http://127.0.0.1:8771 --api-key "$KEY"
 python3 tests/conformance.py --bin ./blurd --url http://127.0.0.1:8771 \
     --api-key "$(cat /tmp/blurd-demo/sidecar.key)" --image /path/to/test.jpg
 ```
-154 checks — but **only if you pass `--dashboard-password` and scope the two
+162 checks — but **only if you pass `--dashboard-password` and scope the two
 keys with the tags `conformance-a` / `conformance-b`**; otherwise whole sections
 are skipped or fail for the wrong reason. See the `blurd-testing` skill. They
 test a binary and a URL, never Python imports, so the same file is the

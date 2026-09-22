@@ -286,3 +286,14 @@ always available, creation is off by default behind a second secret.
 
 Async jobs, unique codes as a primary key, and a sidecar standing in for the
 producer and consumer applications.
+
+## 0.21.0 — 2026-09-22
+
+- Dashboard manual redaction: draw rect/ellipse masks on a stored artifact,
+  re-rendered onto the redacted blob; `manual_regions` on artifact records,
+  `PUT /ui-api/images/<sha>/regions` (dashboard-auth + CSRF). Empty list marks
+  reviewed without re-encoding.
+- Optional plugin seam: an importable `blurd_pro` gets `server.extra_routes`
+  and may pre-authenticate dashboard requests (enables the commercial SSO
+  plugin); OSS is fully functional without it.
+- Docs: logo, dashboard screenshot, links to blurd.intrane.fr product page.
