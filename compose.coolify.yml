@@ -1,0 +1,74 @@
+# blurd — Coolify docker-compose bundle (blurd + MongoDB + MinIO).
+#
+# Used by the Simpliciti Coolify deployment (build_pack=dockercompose,
+# docker_compose_location=/compose.coolify.yml). Coolify generates a .env from
+# the application's env vars; every credential below interpolates from it, so
+# this file stays committable.
+#
+# Required app env vars (runtime): MONGO_PASSWORD, MINIO_ROOT_USER,
+#   MINIO_ROOT_PASSWORD, BLURD_DASHBOARD_USER, BLURD_DASHBOARD_PASSWORD,
+#   BLURD_DASHBOARD_KEY_SECRET
+# Required at build time: WITH_MONGO=1 (build arg)
+
+services:
+  blurd:
+    build:
+      context: .
+      args:
+        WITH_MONGO: ${WITH_MONGO:-1}
+    expose:
+      - 8770
+    stop_grace_period: 40s
+    depends_on:
+      mongo:
+        condition: service_started
+      minio:
+        condition: service_started
+      createbucket:
+        condition: service_completed_successfully
+    environment:
+      BLURD_DB_BACKEND: mongo
+      BLURD_DB_DSN: mongodb://blurd:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+      BLURD_DB_DATABASE: blurd
+      BLURD_STORAGE_BACKEND: s3
+      BLURD_S3_ENDPOINT: http://minio:9000
+      BLURD_S3_BUCKET: blurd
+      BLURD_S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      BLURD_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      BLURD_PULL_MODELS: "1"
+      BLURD_DASHBOARD_USER: ${BLURD_DASHBOARD_USER:-admin}
+      BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD}
+      BLURD_DASHBOARD_KEY_SECRET: ${BLURD_DASHBOARD_KEY_SECRET}
+      BLURD_STORAGE_MAX_BYTES: ${BLURD_STORAGE_MAX_BYTES:-21474836480}
+    volumes:
+      - blurd-home:/var/lib/blurd
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: blurd
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+
+  # MinIO has no "create bucket on boot" flag; one shot with the client.
+  createbucket:
+    image: minio/mc:latest
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000
+      ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 3; done &&
+      mc mb --ignore-existing local/blurd && echo bucket-ready"
+
+volumes:
+  blurd-home:
+  mongo-data:
+  minio-data:
