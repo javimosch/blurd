@@ -535,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
                 "error": {"code": 87, "type": "dashboard_disabled",
                           "message": "Dashboard password is not set",
                           "suggestions": ["Run: blurd dashboard-password <password>"]}})
-        # blurd_dashboard_authed is set by a plugin (blurd_pro sso) that has
+        # blurd_dashboard_authed is set by a plugin that has
         # already verified the request; basic auth stays the fallback.
         if not (getattr(self, "blurd_dashboard_authed", False)
                 or auth.check_basic(self.headers,
@@ -838,8 +838,8 @@ class BlurdServer(BoundedThreadingHTTPServer):
         # Blocked-request events flush to the audit log on each hit; the sweep
         # covers a burst that goes quiet before another request arrives.
         self.blurd_queue.on_sweep = self.blurd_rate.flush
-        # Optional commercial plugin (blurd_pro): registers extra routes on
-        # `extra_routes` -- see src/plugins.py. OSS is complete without it.
+        # Optional plugin (blurd_pro): registers extra routes on
+        # `extra_routes` -- see src/plugins.py. Complete without it.
         self.extra_routes: dict = {}
         self.blurd_plugin = plugins.load(cfg)
         if self.blurd_plugin is not None:

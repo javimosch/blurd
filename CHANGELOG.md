@@ -22,9 +22,8 @@ route. Six new conformance checks; identical on all three backends.
 **Plugin seam.** `src/plugins.py`: if a `blurd_pro` package is importable,
 `serve` calls its `install(server)` once at startup; the plugin registers
 handlers on `server.extra_routes` (`(method, path-prefix) -> fn`), which get
-first pick of the non-`/v1` path space. OSS code never imports plugin
-internals; nothing is required for blurd to run without it. This is where
-commercial extensions (SSO, etc.) will live.
+first pick of the non-`/v1` path space. Core code never imports plugin
+internals; nothing is required for blurd to run without it.
 
 ## 0.20.0
 
@@ -294,6 +293,5 @@ producer and consumer applications.
   `PUT /ui-api/images/<sha>/regions` (dashboard-auth + CSRF). Empty list marks
   reviewed without re-encoding.
 - Optional plugin seam: an importable `blurd_pro` gets `server.extra_routes`
-  and may pre-authenticate dashboard requests (enables the commercial SSO
-  plugin); OSS is fully functional without it.
-- Docs: logo, dashboard screenshot, links to blurd.intrane.fr product page.
+  and may pre-authenticate dashboard requests; fully functional without it.
+- Docs: logo and dashboard screenshot.

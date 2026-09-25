@@ -283,8 +283,8 @@ never leaves that process.
     can only remove information, never reveal it. Clearing the list is "mark
     reviewed", not "undo": burned pixels cannot be restored. The re-encode
     follows the same ordering as `process()` — object before row.
-49. **`blurd_pro` is the only commercial extension point.** `src/plugins.py`
+49. **`blurd_pro` is the only plugin extension point.** `src/plugins.py`
     loads it if importable and hands it `server.extra_routes` for non-`/v1`
-    paths. OSS code must never import plugin internals, and the core feature
-    set must stay complete without it — the seam exists so pro work does not
-    fork the dashboard or the dispatch chain.
+    paths. Core code must never import plugin internals, and the feature
+    set must stay complete without it — the seam exists so plugin work does
+    not fork the dashboard or the dispatch chain.
