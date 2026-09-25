@@ -150,3 +150,8 @@ pre{background:#0b0d10;border:1px solid var(--line);border-radius:var(--radius);
   color:var(--dim);margin:14px 0 4px}
 .enum{color:var(--dim);font-size:10px}
 .schemaref{color:var(--accent)}
+.example{margin-top:10px}
+.example summary{cursor:pointer;color:var(--dim);font-size:11px;
+  text-transform:uppercase;letter-spacing:1px}
+.example summary:hover{color:var(--ink)}
+.example pre{margin-top:8px;max-height:320px}

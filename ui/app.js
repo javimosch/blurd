@@ -755,7 +755,10 @@ async function loadApiDocs() {
               <td>${esc(f.type)}</td>
               <td>${f.required ? '<span class="pill warn">yes</span>' : ""}</td>
               <td>${esc(f.description)}</td></tr>`).join("") +
-            "</tbody></table></div>").join("")
+            "</tbody></table>" +
+            (s.example ? `<details class="example"><summary>example</summary>
+              <pre>${esc(JSON.stringify(s.example, null, 2))}</pre></details>` : "") +
+            "</div>").join("")
         : "");
   } catch (err) {
     el.innerHTML = `<div class="empty">could not load /api-docs.json — ${esc(err.message)}</div>`;
@@ -806,37 +809,6 @@ function wirePager(p, ids, reload) {
 
 function resetPager(p) { p.stack = []; p.cursor = null; p.nextCursor = null; }
 
-$("f-api").onclick = () => {
-  const q = filterQuery();
-  q.delete("cursor"); // a cursor only means something inside one paging session
-  apiSheet("GET /v1/images — this view, via the API", [
-    apiGet("/v1/images?" + q.toString()),
-    `# every filter box maps to a parameter:
-#   tag (repeatable, ANDed) · meta.<key> · sha (prefix) · code (exact or prefix*)
-#   needs_review=1 · since/until (ISO) · sort+direction · limit
-# next page: pass the response's next_cursor back as ?cursor=`,
-    API_KEY_NOTE,
-  ]);
-};
-$("j-api").onclick = () => {
-  const q = jobQuery();
-  q.delete("cursor");
-  apiSheet("Jobs via /v1 — submit, poll, list", [
-    "# this job list\n" + apiGet("/v1/jobs?" + q.toString()),
-    "# submit an image by URL (202 → job id in Location)\n" +
-    `curl -X POST -H "Authorization: Bearer ${API_KEY_VAR}" ` +
-    `-H "Content-Type: application/json" \\\n` +
-    `  -d '{"url":"https://example.com/photo.jpg","external_id":"IMG_0001.jpg","tags":["demo"]}' \\\n` +
-    `  "${location.origin}/v1/images"`,
-    "# or upload the bytes\n" +
-    `curl -X POST -H "Authorization: Bearer ${API_KEY_VAR}" ` +
-    `--data-binary @photo.jpg -H "Content-Type: image/jpeg" \\\n` +
-    `  "${location.origin}/v1/images?code=IMG_0001.jpg&tags=demo"`,
-    "# long-poll one job until it settles (max 120s)\n" +
-    apiGet("/v1/jobs/<job_id>?wait=30"),
-    API_KEY_NOTE,
-  ]);
-};
 $("apply").onclick = () => { resetPager(state); load(); };
 $("reset").onclick = () => {
   ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) => ($(i).value = ""));

@@ -985,6 +985,18 @@
             "type": "object",
             "required": false,
             "description": "omit for an unrestricted key; all constraints are ANDed"
+          },
+          {
+            "name": "scope.tags",
+            "type": "string[]",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "scope.metadata",
+            "type": "object",
+            "required": false,
+            "description": ""
           }
         ]
       },
@@ -1103,8 +1115,61 @@
           "type": "object",
           "required": false,
           "description": ""
+        },
+        {
+          "name": "error.code",
+          "type": "integer",
+          "required": false,
+          "description": "Semantic exit code, mirrored by the CLI"
+        },
+        {
+          "name": "error.type",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error.message",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error.details",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error.recoverable",
+          "type": "boolean",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error.retry_after",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error.suggestions",
+          "type": "string[]",
+          "required": false,
+          "description": ""
         }
-      ]
+      ],
+      "example": {
+        "ok": false,
+        "error": {
+          "code": 92,
+          "type": "not_found",
+          "message": "no such external_id in this tenant",
+          "recoverable": false,
+          "retry_after": null,
+          "suggestions": []
+        }
+      }
     },
     "Job": {
       "fields": [
@@ -1204,7 +1269,27 @@
           "required": false,
           "description": ""
         }
-      ]
+      ],
+      "example": {
+        "job_id": "job_c87d71ab975dbcb4",
+        "status": "done",
+        "external_id": "IMG_20250922_114502.jpg",
+        "source_sha": "276455eb10e8e32ec238dff30297151b125b32634e1d4c0547e9c698b1996d2e",
+        "profile_hash": "1e994f69934887ce",
+        "source_kind": "stream",
+        "cached": false,
+        "attempts": 1,
+        "created_at": "2026-09-25T08:17:28Z",
+        "started_at": "2026-09-25T08:17:28Z",
+        "finished_at": "2026-09-25T08:17:29Z",
+        "duration_ms": 812.4,
+        "blob_url": "/v1/blobs/276455eb\u2026",
+        "blob_url_by_code": "/v1/blobs/by-code/IMG_20250922_114502.jpg",
+        "result": {
+          "source_sha": "276455eb\u2026",
+          "note": "Artifact shape, see schema below"
+        }
+      }
     },
     "Artifact": {
       "fields": [
@@ -1239,14 +1324,98 @@
           "description": "operator-drawn additive masks applied on top of the stored blob via the dashboard; always black, normalized 0..1 coords"
         },
         {
+          "name": "manual_regions[].shape",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "manual_regions[].x",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "manual_regions[].y",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "manual_regions[].w",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "manual_regions[].h",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
           "name": "blob",
           "type": "object",
           "required": false,
           "description": ""
         },
         {
+          "name": "blob.url",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "blob.sha256",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "blob.bytes",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "blob.mime",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
           "name": "image",
           "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image.width",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image.height",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image.mime",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image.source_kind",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image.source_ref",
+          "type": "string",
           "required": false,
           "description": ""
         },
@@ -1261,6 +1430,18 @@
           "type": "object[]",
           "required": false,
           "description": "unscoped callers only: which tenant owns each code"
+        },
+        {
+          "name": "codes_detail[].tenant",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "codes_detail[].external_id",
+          "type": "string",
+          "required": false,
+          "description": ""
         },
         {
           "name": "tags",
@@ -1281,8 +1462,56 @@
           "description": ""
         },
         {
+          "name": "detections[].cls",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "detections[].box",
+          "type": "integer[]",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "detections[].score",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "detections[].detector",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
           "name": "stats",
           "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "stats.timings",
+          "type": "object",
+          "required": false,
+          "description": "Per-stage milliseconds: fetch, decode, detect_face, detect_plate, redact, encode, store, total"
+        },
+        {
+          "name": "stats.detections",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "stats.models",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "stats.redact",
+          "type": "string",
           "required": false,
           "description": ""
         },
@@ -1304,7 +1533,64 @@
           "required": false,
           "description": ""
         }
-      ]
+      ],
+      "example": {
+        "source_sha": "276455eb10e8e32ec238dff30297151b125b32634e1d4c0547e9c698b1996d2e",
+        "profile_hash": "1e994f69934887ce",
+        "cached": false,
+        "needs_review": false,
+        "manual_regions": [],
+        "blob": {
+          "url": "/v1/blobs/276455eb\u2026",
+          "sha256": "0e393b18\u2026",
+          "bytes": 412308,
+          "mime": "image/jpeg"
+        },
+        "image": {
+          "width": 2048,
+          "height": 1536,
+          "mime": "image/jpeg",
+          "source_kind": "stream",
+          "source_ref": null
+        },
+        "codes": [
+          "IMG_20250922_114502.jpg"
+        ],
+        "tags": [
+          "isoprod-demo"
+        ],
+        "metadata": {
+          "source": "isoprod"
+        },
+        "detections": [
+          {
+            "cls": "face",
+            "box": [
+              611,
+              402,
+              118,
+              132
+            ],
+            "score": 0.91,
+            "detector": "yunet-2023mar"
+          }
+        ],
+        "stats": {
+          "timings": {
+            "fetch": 0,
+            "decode": 41,
+            "detect_face": 380,
+            "detect_plate": 290,
+            "redact": 55,
+            "encode": 38,
+            "store": 8,
+            "total": 812
+          }
+        },
+        "created_at": "2026-09-25T08:17:29Z",
+        "errors": [],
+        "warnings": []
+      }
     }
   }
 }

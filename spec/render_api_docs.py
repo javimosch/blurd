@@ -23,6 +23,48 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "spec" / "openapi.yaml"
 OUT = ROOT / "ui" / "api-docs.json"
 
+# Hand-curated examples beat type-derived mocks: field VALUES carry meaning
+# (a source_sha looks like hex, a job_id like "job_…"), which a generated
+# stub cannot show. Kept in sync by eye — they are illustrative, not contract.
+EXAMPLES = {
+    "Job": {
+        "job_id": "job_c87d71ab975dbcb4", "status": "done",
+        "external_id": "IMG_20250922_114502.jpg",
+        "source_sha": "276455eb10e8e32ec238dff30297151b125b32634e1d4c0547e9c698b1996d2e",
+        "profile_hash": "1e994f69934887ce",
+        "source_kind": "stream", "cached": False, "attempts": 1,
+        "created_at": "2026-09-25T08:17:28Z", "started_at": "2026-09-25T08:17:28Z",
+        "finished_at": "2026-09-25T08:17:29Z", "duration_ms": 812.4,
+        "blob_url": "/v1/blobs/276455eb…",
+        "blob_url_by_code": "/v1/blobs/by-code/IMG_20250922_114502.jpg",
+        "result": {"source_sha": "276455eb…", "note": "Artifact shape, see schema below"},
+    },
+    "Artifact": {
+        "source_sha": "276455eb10e8e32ec238dff30297151b125b32634e1d4c0547e9c698b1996d2e",
+        "profile_hash": "1e994f69934887ce", "cached": False,
+        "needs_review": False, "manual_regions": [],
+        "blob": {"url": "/v1/blobs/276455eb…",
+                 "sha256": "0e393b18…", "bytes": 412308, "mime": "image/jpeg"},
+        "image": {"width": 2048, "height": 1536, "mime": "image/jpeg",
+                  "source_kind": "stream", "source_ref": None},
+        "codes": ["IMG_20250922_114502.jpg"],
+        "tags": ["isoprod-demo"], "metadata": {"source": "isoprod"},
+        "detections": [{"cls": "face", "box": [611, 402, 118, 132],
+                        "score": 0.91, "detector": "yunet-2023mar"}],
+        "stats": {"timings": {"fetch": 0, "decode": 41, "detect_face": 380,
+                              "detect_plate": 290, "redact": 55, "encode": 38,
+                              "store": 8, "total": 812}},
+        "created_at": "2026-09-25T08:17:29Z", "errors": [], "warnings": [],
+    },
+    "Error": {
+        "ok": False,
+        "error": {"code": 92, "type": "not_found",
+                  "message": "no such external_id in this tenant",
+                  "recoverable": False, "retry_after": None,
+                  "suggestions": []},
+    },
+}
+
 GROUPS = {
     "producer — submit images, track jobs": {
         "/v1/images": ["post"],
@@ -91,12 +133,27 @@ def params(op):
     return out
 
 
-def json_fields(schema):
+def json_fields(schema, prefix=""):
+    """Flatten nested objects into dot-path rows — `blob.url`, `detections[].cls` —
+    so one table documents the whole tree instead of an unhelpful `object`."""
     props = (schema or {}).get("properties") or {}
     required = set((schema or {}).get("required") or [])
-    return [{"name": k, "type": type_of(v), "required": k in required,
-             "description": (v or {}).get("description", "") if isinstance(v, dict) else ""}
-            for k, v in props.items()]
+    out = []
+    for k, v in props.items():
+        v = v if isinstance(v, dict) else {}
+        name = prefix + k
+        t = type_of(v)
+        out.append({"name": name, "type": t, "required": k in required,
+                    "description": v.get("description", "")})
+        sub = v.get("properties")
+        if not sub and v.get("type") == "array":
+            sub = (v.get("items") or {}).get("properties")
+            if sub:
+                name += "[]"
+        if sub:
+            out.extend(json_fields({"properties": sub, "required": v.get("required")},
+                                   name + "."))
+    return out
 
 
 def body(op):
@@ -147,7 +204,7 @@ def render():
         "title": spec.get("info", {}).get("title", "blurd API"),
         "endpoints": endpoints,
         "schemas": {
-            name: {"fields": json_fields(s)}
+            name: {"fields": json_fields(s), "example": EXAMPLES.get(name)}
             for name, s in schemas.items()
             if isinstance(s, dict) and s.get("properties")
         },
