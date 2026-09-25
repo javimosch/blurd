@@ -52,7 +52,7 @@ services:
       - mongo-data:/data/db
 
   minio:
-    image: quay.io/minio/minio:latest
+    image: minio/minio:latest
     command: server /data
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -62,11 +62,14 @@ services:
 
   # MinIO has no "create bucket on boot" flag; one shot with the client.
   createbucket:
-    image: quay.io/minio/mc:latest
+    image: amazon/aws-cli:2.22.0
     entrypoint: >
-      /bin/sh -c "until mc alias set local http://minio:9000
-      ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 3; done &&
-      mc mb --ignore-existing local/blurd && echo bucket-ready"
+      /bin/sh -c "until aws --endpoint-url http://minio:9000
+      --region us-east-1 s3 mb s3://blurd; do sleep 3; done &&
+      echo bucket-ready"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
 
 volumes:
   blurd-home:
