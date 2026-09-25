@@ -760,6 +760,12 @@ async function loadApiDocs() {
               <pre>${esc(JSON.stringify(s.example, null, 2))}</pre></details>` : "") +
             "</div>").join("")
         : "");
+    // Deep link: /#api-schema-<Name> scrolls to the card once it exists.
+    const anchor = location.hash.slice(1);
+    if (anchor.startsWith("api-schema-")) {
+      const t = document.getElementById(anchor);
+      if (t) t.scrollIntoView({ block: "center" });
+    }
   } catch (err) {
     el.innerHTML = `<div class="empty">could not load /api-docs.json — ${esc(err.message)}</div>`;
   }
@@ -815,31 +821,43 @@ async function loadCliDocs() {
   }
 }
 
+/* Tabs are routed through location.hash so a view can be shared as a URL —
+   /#cli opens the CLI docs directly, /#api-schema-Artifact deep-links one
+   schema card. */
+const TAB_LOADERS = { images: load, jobs: loadJobs, keys: loadKeys,
+                      public: loadPublic, api: loadApiDocs, cli: loadCliDocs };
+function activateTab(view) {
+  document.querySelectorAll(".tab").forEach((x) =>
+    x.classList.toggle("active", x.dataset.view === view));
+  const images = view === "images";
+  $("jobs").hidden = view !== "jobs";
+  $("keys").hidden = view !== "keys";
+  $("public").hidden = view !== "public";
+  $("api").hidden = view !== "api";
+  $("cli").hidden = view !== "cli";
+  $("grid").hidden = !images;
+  // By id, not by class: `#jobs` sits BEFORE the images pager in the DOM, so
+  // querySelector(".pager") picks the jobs one and hides it exactly when the
+  // jobs tab needs it.
+  $("img-filters").hidden = !images;
+  $("img-pager").hidden = !images;
+  $("empty").hidden = true;
+  (TAB_LOADERS[view] || load)();
+}
+function tabFromHash() {
+  const h = location.hash.slice(1);
+  if (TAB_LOADERS[h]) return h;
+  if (h.startsWith("api-schema-")) return "api";
+  return "images";
+}
 document.querySelectorAll(".tab").forEach((t) => {
-  t.onclick = () => {
-    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-    t.classList.add("active");
-    const view = t.dataset.view;
-    const images = view === "images";
-    $("jobs").hidden = view !== "jobs";
-    $("keys").hidden = view !== "keys";
-    $("public").hidden = view !== "public";
-    $("api").hidden = view !== "api";
-    $("cli").hidden = view !== "cli";
-    $("grid").hidden = !images;
-    // By id, not by class: `#jobs` sits BEFORE the images pager in the DOM, so
-    // querySelector(".pager") picks the jobs one and hides it exactly when the
-    // jobs tab needs it.
-    $("img-filters").hidden = !images;
-    $("img-pager").hidden = !images;
-    $("empty").hidden = true;
-    if (images) load();
-    else if (view === "jobs") loadJobs();
-    else if (view === "public") loadPublic();
-    else if (view === "api") loadApiDocs();
-    else if (view === "cli") loadCliDocs();
-    else loadKeys();
-  };
+  t.onclick = () => { location.hash = t.dataset.view; activateTab(t.dataset.view); };
+});
+window.addEventListener("hashchange", () => {
+  const v = tabFromHash();
+  const current = document.querySelector(".tab.active");
+  if (current && current.dataset.view === v) return; // click already routed it
+  activateTab(v);
 });
 
 /* Keyset paging only moves forward, so "prev" is the stack of cursors already
@@ -888,4 +906,4 @@ document.onkeydown = (e) => { if (e.key === "Escape") closeModal(); };
 ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) =>
   ($(i).onkeydown = (e) => { if (e.key === "Enter") { resetPager(state); load(); } }));
 
-load(); loadStats(); loadFacets();
+activateTab(tabFromHash()); loadStats(); loadFacets();

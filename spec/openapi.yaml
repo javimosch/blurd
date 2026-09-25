@@ -182,7 +182,20 @@ paths:
         - { in: query, name: on_conflict, schema: { type: string, enum: [reuse, replace, reject], default: reuse } }
         - { in: query, name: tags, schema: { type: string }, description: "comma separated (raw-body form)" }
         - { in: query, name: metadata, schema: { type: string }, description: "JSON object (raw-body form)" }
-        - { in: query, name: profile, schema: { type: string }, description: "JSON profile overrides; storage.ttl (seconds, 60-2592000) prunes the blob after the deadline" }
+        - in: query
+          name: profile
+          schema: { type: string }
+          description: >
+            JSON profile overrides, deep-merged into the defaults. A profile is
+            the processing configuration — detect.{face,plate}.{model,min_score},
+            detect.max_side, redact.{mode,strength,expand,shape}, output.{format,
+            quality,max_side}, storage.ttl. The artifact cache key is
+            (source_sha, profile_hash of the EFFECTIVE profile), so different
+            intent is a different artifact. storage.ttl (seconds, 60–2592000)
+            prunes the blob after the deadline: reads answer 410
+            resource_expired while the record, detections and labels survive;
+            a resubmit regenerates the bytes. Example for a 24h blob:
+            {"storage":{"ttl":86400}}
         - { in: query, name: force, schema: { type: string }, description: "1 to bypass the cache" }
       requestBody:
         content:

@@ -226,7 +226,7 @@
           "type": "string",
           "enum": null,
           "default": null,
-          "description": "JSON profile overrides; storage.ttl (seconds, 60-2592000) prunes the blob after the deadline"
+          "description": "JSON profile overrides, deep-merged into the defaults. A profile is the processing configuration \u2014 detect.{face,plate}.{model,min_score}, detect.max_side, redact.{mode,strength,expand,shape}, output.{format, quality,max_side}, storage.ttl. The artifact cache key is (source_sha, profile_hash of the EFFECTIVE profile), so different intent is a different artifact. storage.ttl (seconds, 60\u20132592000) prunes the blob after the deadline: reads answer 410 resource_expired while the record, detections and labels survive; a resubmit regenerates the bytes. Example for a 24h blob: {\"storage\":{\"ttl\":86400}}\n"
         },
         {
           "name": "force",

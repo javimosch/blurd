@@ -48,6 +48,9 @@ COMMANDS
       --mode pixelate|blur|solid
       --face-score F          Min face confidence (default 0.6)
       --plate-score F         Min plate confidence (default 0.35)
+      --ttl SECONDS           Keep the redacted blob only N seconds (60..2592000);
+                              the record survives, the bytes are pruned on expiry
+                              and a resubmit regenerates them. --ttl 86400 = 24 h.
       --force                 Reprocess even if a cached artifact exists.
       --out FILE              Also write the redacted image to FILE.
   jobs list [--status S] [--code C]   Recent jobs and queue depth.
@@ -111,6 +114,23 @@ COMMANDS
                               delete. Blocking; stop the daemon first.
   doctor                      Check interpreter, deps, models, DB.
   guide | version
+
+PROFILES & TTL
+  A profile is the processing configuration: redact mode, detector models and
+  thresholds, output format, and optional storage.ttl. The shipped default is:
+    {{"detect":{{"face":{{"min_score":0.6,"model":"yunet-2023mar"}},"max_side":1280,
+      "plate":{{"min_score":0.35,"model":"yolov9t-512-plates"}}}},
+     "output":{{"format":"jpeg","max_side":0,"quality":90}},
+     "redact":{{"expand":0.18,"mode":"pixelate",
+      "shape":{{"face":"ellipse","plate":"rect"}},"strength":0.06}},"version":1}}
+  Any subset may be overridden per request: ?profile={{"storage":{{"ttl":86400}}}}
+  on POST /v1/images, or --ttl/--mode/--face-score on the CLI (they build the
+  same override). profile_hash is computed from the effective profile, and the
+  artifact cache key is (source_sha, profile_hash) -- so a TTL'd image and a
+  permanent one are DIFFERENT artifacts, never shared cache space.
+  storage.ttl semantics: the record stores expires_at; once past, blob reads
+  answer 410 resource_expired and a sweep prunes the bytes. Metadata, sha,
+  detections and tags all survive -- a resubmit regenerates the blob.
 
 OUTPUT CONTRACT
   JSON on stdout by default: {{"version":"1.0","data":...,"timestamp":...}}
@@ -346,6 +366,12 @@ def as_guide() -> dict:
                      "tenant namespace",
             "profile_hash": "hash of the redaction profile (mode, scores, "
                             "models); part of the cache key",
+            "profile": "the processing configuration (redact mode, detector "
+                       "models and thresholds, output format, storage.ttl). "
+                       "Per-request JSON overrides merge into the defaults; "
+                       "?profile={\"storage\":{\"ttl\":86400}} or --ttl 86400 "
+                       "keeps a blob only 24 h -- the row survives, bytes are "
+                       "pruned and resubmitting regenerates them",
             "needs_review": "artifact with weak detections, flagged for a "
                             "human in the dashboard",
         },
@@ -358,6 +384,7 @@ def as_guide() -> dict:
             "blurd keys add app-acme --scope-tag acme",
             "blurd keys export --out keys.json && blurd keys import keys.json",
             "blurd serve --daemon --port 8770",
+            "blurd blur photo.jpg --ttl 86400   # redacted blob lives 24 h, not forever",
             "blurd --remote http://host:8770 --api-key blk_... blur photo.jpg",
             "blurd daemon start|stop|status",
         ],
