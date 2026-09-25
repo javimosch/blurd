@@ -1,0 +1,118 @@
+{
+  "generated_from": "src/guide.py",
+  "guide": {
+    "tool": "blurd",
+    "version": "0.21.0",
+    "one_liner": "Redacts faces and licence plates in images, stores ONLY the redacted result keyed by sha256(source) -- the source image is never written to disk.",
+    "model": "A producer POSTs an image (optionally with its own unique --code); a consumer fetches the redacted image by sha or by that code. The cache key is (source_sha, profile_hash), so a different blur profile is a different artifact. Scoped API keys are tenants: each owns a namespace of codes and labels, and cannot see another tenant's data (404, never 403). Keys are stored as sha256 only -- export/import moves the hash, never the plaintext.",
+    "loop": "submit -> poll job -> read artifact. Submissions are async: POST returns a job id; poll /v1/jobs/<id> (or --wait), then fetch bytes or the record. A repeated submission is a dedup hit (~1 ms, cached:true), not a reprocess.",
+    "concepts": {
+      "job": "async unit of work; queued, running, done or failed",
+      "artifact": "one redacted output for (source_sha, profile_hash)",
+      "external_id": "the producer's own code for an image; indexed per-tenant for single-lookup consumer fetches",
+      "scope": "a conjunction of tags/metadata on an API key; defines a tenant namespace",
+      "profile_hash": "hash of the redaction profile (mode, scores, models); part of the cache key",
+      "needs_review": "artifact with weak detections, flagged for a human in the dashboard"
+    },
+    "commands": {
+      "blur": "Submit one image (path, URL or stdin) as a job",
+      "jobs": "list | get async jobs, with queue depth",
+      "list": "Filter stored artifacts (--code, --tag, --meta, --sha)",
+      "get": "Full record, by source sha or --code",
+      "download": "Fetch redacted image bytes, by sha or --code",
+      "delete": "Remove an image and its artifacts",
+      "stats": "Aggregate counters",
+      "serve": "Run API + dashboard (optionally as a daemon)",
+      "daemon": "start | stop | status the daemon (cli-daemon-spec)",
+      "stop": "Stop the daemon",
+      "status": "Daemon status",
+      "help-json": "This catalog",
+      "keys": "add | list | revoke | export | import API keys",
+      "dashboard-keys": "enable | disable | status for dashboard key minting",
+      "audit": "Recent privileged mutations",
+      "dashboard-password": "Set dashboard basic-auth password",
+      "feedback": "Send feedback to this deployment and the shared relay",
+      "models": "list | pull detector models",
+      "config": "get | set configuration values",
+      "storage": "show | check the blob backend",
+      "migrate-blobs": "Copy blobs between storage backends",
+      "vacuum": "Reclaim free database pages (blocking)",
+      "doctor": "Environment self-check",
+      "guide": "This guide",
+      "version": "Version info"
+    },
+    "examples": [
+      "blurd models pull --all",
+      "blurd blur photo.jpg --code cam3/IMG_42.jpg --tag fleet",
+      "blurd get --code cam3/IMG_42.jpg",
+      "blurd download --code cam3/IMG_42.jpg --out redacted.jpg",
+      "blurd keys add app-acme --scope-tag acme",
+      "blurd keys export --out keys.json && blurd keys import keys.json",
+      "blurd serve --daemon --port 8770",
+      "blurd --remote http://host:8770 --api-key blk_... blur photo.jpg",
+      "blurd daemon start|stop|status"
+    ],
+    "gotchas": [
+      "Only the redacted image is stored; there is no way to retrieve the source later.",
+      "Upload jobs are not durable across a restart (source bytes are never spooled); url jobs are requeued automatically.",
+      "Cached results are keyed by (source_sha, profile_hash): change a threshold or model and every earlier artifact is bypassed, not overwritten.",
+      "keys are sha256-only: a listing never shows a usable key; export carries hashes + scopes, which is what makes a key portable.",
+      "Backpressure is HTTP 503 + Retry-After, never 502."
+    ]
+  },
+  "catalog": {
+    "version": "0.21.0",
+    "commands": {
+      "blur": "Submit one image (path, URL or stdin) as a job",
+      "jobs": "list | get async jobs, with queue depth",
+      "list": "Filter stored artifacts (--code, --tag, --meta, --sha)",
+      "get": "Full record, by source sha or --code",
+      "download": "Fetch redacted image bytes, by sha or --code",
+      "delete": "Remove an image and its artifacts",
+      "stats": "Aggregate counters",
+      "serve": "Run API + dashboard (optionally as a daemon)",
+      "daemon": "start | stop | status the daemon (cli-daemon-spec)",
+      "stop": "Stop the daemon",
+      "status": "Daemon status",
+      "help-json": "This catalog",
+      "keys": "add | list | revoke | export | import API keys",
+      "dashboard-keys": "enable | disable | status for dashboard key minting",
+      "audit": "Recent privileged mutations",
+      "dashboard-password": "Set dashboard basic-auth password",
+      "feedback": "Send feedback to this deployment and the shared relay",
+      "models": "list | pull detector models",
+      "config": "get | set configuration values",
+      "storage": "show | check the blob backend",
+      "migrate-blobs": "Copy blobs between storage backends",
+      "vacuum": "Reclaim free database pages (blocking)",
+      "doctor": "Environment self-check",
+      "guide": "This guide",
+      "version": "Version info"
+    },
+    "global_flags": [
+      "--json",
+      "--human",
+      "--remote URL",
+      "--api-key KEY",
+      "--home DIR",
+      "--help-json"
+    ],
+    "output_formats": [
+      "json",
+      "human"
+    ],
+    "exit_codes": {
+      "0": "success",
+      "85": "invalid_argument",
+      "87": "validation_error",
+      "92": "resource_not_found",
+      "94": "resource_conflict",
+      "105": "connection_timeout",
+      "106": "api_unavailable",
+      "107": "auth_failed",
+      "108": "overloaded",
+      "110": "internal_error"
+    }
+  },
+  "text": "blurd 0.21.0 - image redaction (faces + licence plates) as CLI, API and dashboard\n\nWHAT IT DOES\n  Detects faces and licence plates in an image, redacts them (mosaic by\n  default), stores ONLY the redacted result, and links it to the sha256 of the\n  source. The source image itself is never written to disk.\n\n  Submission is ASYNCHRONOUS: you get a job id immediately and poll it. A\n  producer never holds an HTTP request open while an image is processed.\n\n  Attach your own unique code (--code, often the filename) and a consumer can\n  fetch the redacted image by that code in a single indexed lookup -- ~13 us of\n  query time with 50k images stored.\n\nTHREE WAYS TO RUN THE SAME COMMANDS\n  blurd blur photo.jpg                     local: runs the pipeline in-process\n  blurd serve --daemon                     host the API + dashboard\n  blurd --remote http://host:8770 \\\n        --api-key blk_... blur photo.jpg   same command against a remote daemon\n\nQUICK START\n  blurd models pull --all                  download detectors (~8 MB, once)\n  blurd blur photo.jpg --code cam3/IMG_42.jpg --tag fleet --meta site=paris\n  blurd get --code cam3/IMG_42.jpg         the consumer lookup\n  blurd download --code cam3/IMG_42.jpg --out redacted.jpg\n  blurd list --tag fleet\n  blurd jobs list\n  blurd keys add ci-pipeline               create an API key (shown once)\n  blurd dashboard-password hunter2\n  blurd serve --daemon                     then open http://127.0.0.1:8770\n\nCOMMANDS\n  blur <path|-> [--url URL]   Redact one image. '-' reads bytes from stdin.\n      --code CODE             Your own unique id, indexed. Usually the filename.\n                              A consumer fetches by this; re-submitting a known\n                              code short-circuits without refetching.\n      --async                 Return the job at once (needs --remote/a daemon).\n      --wait SECONDS          How long to block (default 120).\n      --on-conflict POLICY    reuse (default) | replace | reject, for when the\n                              code already maps to different bytes.\n      --tag T (repeatable)    Attach a tag.\n      --meta k=v (repeatable) Attach metadata.\n      --mode pixelate|blur|solid\n      --face-score F          Min face confidence (default 0.6)\n      --plate-score F         Min plate confidence (default 0.35)\n      --force                 Reprocess even if a cached artifact exists.\n      --out FILE              Also write the redacted image to FILE.\n  jobs list [--status S] [--code C]   Recent jobs and queue depth.\n  jobs get <job_id> [--wait S]        One job; --wait long-polls.\n  list                        Filter stored artifacts.\n      --code C                Exact code, or a trailing * for a prefix scan.\n      --tag T, --meta k=v, --sha PREFIX, --needs-review,\n      --since ISO, --until ISO, --limit N, --offset N\n  get <sha>|--code CODE       Full record for one image.\n  download <sha>|--code CODE --out FILE   Fetch the redacted image.\n  delete <sha>                Remove an image, its artifacts and its blobs.\n  stats                       Counts, bytes stored, top tags.\n  serve [--host H --port P]   Run the API + dashboard. --daemon to background.\n  stop | status               Daemon lifecycle.\n  keys add <name> [--scope-tag T] [--scope-meta K=V]\n                              Create a key. With a scope it is restricted to\n                              images carrying ALL of those labels -- which also\n                              gives it its own TENANT: its unique codes live in\n                              their own namespace (two apps can both use\n                              \"IMG_0042.jpg\"), its uploads are stamped with the\n                              scope automatically, and it can neither see nor\n                              label another tenant's images. See\n                              spec/scoped-keys.md.\n  keys add <name> --key SECRET   Register an existing key (e.g. one another\n                              instance already issued) instead of minting one.\n  keys list | keys revoke <id>\n  keys export [--out FILE]     Export key records: sha256 hashes + scopes,\n                              NEVER plaintext. Makes the same key work on a\n                              second instance without re-showing it.\n  keys import <file|'->        Import an export file. Idempotent: a key_sha\n                              already present is skipped, an id collision is\n                              remapped. Audited as key.import.\n  dashboard-password <pw>     Set the dashboard basic-auth password.\n  dashboard-keys enable --secret S | disable | status\n                              Allow minting API keys from the dashboard.\n                              OFF by default: a minted key outlives the\n                              dashboard password, so turning one shared browser\n                              login into permanent API access is opt-in and\n                              needs a SECOND secret, sent as X-Blurd-Admin-Secret.\n                              Listing and REVOKING keys is always available --\n                              revocation is fail-safe and you want it fast.\n  audit [--limit N]           Privileged mutations: key.create, key.import,\n                              key.revoke,\n                              image.delete, with channel and source address.\n  daemon start|stop|status    Daemon lifecycle; idempotent (a second start or\n                              a stop on a stopped daemon reports the state and\n                              succeeds). Server also answers GET /_health and\n                              POST /_shutdown (loopback only).\n  feedback \"<msg>\" [-kind K]  Dual-write feedback: this deployment's store AND\n                              the shared relay (FEEDBACK_RELAY=off disables).\n                              Never fails the caller.\n  models list | models pull [NAME|--all]\n  config get <key> | config set <key> <value>\n  storage show | storage check\n                              Inspect the blob backend, or round-trip a probe\n                              object through it.\n  migrate-blobs --to s3|local [--batch N] [--delete-source]\n                              Copy blobs between backends. Resumable: anything\n                              already present at the destination is skipped.\n  vacuum                      Reclaim free pages after a migration or a large\n                              delete. Blocking; stop the daemon first.\n  doctor                      Check interpreter, deps, models, DB.\n  guide | version\n\nOUTPUT CONTRACT\n  JSON on stdout by default: {\"version\":\"1.0\",\"data\":...,\"timestamp\":...}\n  --human for a readable summary. Logs and progress go to stderr, always.\n  Errors go to stderr as {\"ok\":false,\"error\":{code,type,message,details,\n  recoverable,retry_after,suggestions}}.\n\nEXIT CODES\n  0 ok | 85 invalid argument | 87 validation | 92 not found | 94 conflict\n  105 upstream timeout | 106 api unavailable | 107 auth failed | 110 internal\n\nREST API (all /v1 endpoints except /v1/health need Authorization: Bearer)\n\n  producer (the service that holds the originals)\n  POST   /v1/images            raw image bytes (Content-Type: image/jpeg),\n                               or {\"url\":\"...\",\"external_id\":\"...\",\"tags\":[]}\n                               query: ?code=&tags=a,b&metadata={...}\n                                      &on_conflict=reuse|replace|reject\n                                      &wait=SECONDS&force=1\n                               -> 202 + job, Location: /v1/jobs/<id>\n                                  (200 if it settled within ?wait)\n  GET    /v1/jobs/<id>[?wait=N]  status; `result` once done\n  GET    /v1/jobs              ?status=&code=&limit=&offset=  + queue depth\n\n  consumer (the user-facing app's backend)\n  GET    /v1/blobs/by-code/<code>   redacted bytes, ONE indexed lookup. ETag +\n                                    304 on If-None-Match. The hot path.\n  GET    /v1/images/by-code/<code>  full record by code\n  GET    /v1/thumbs/by-code/<code>  thumbnail by code\n  GET    /v1/images/<sha>           full record by source hash\n  GET    /v1/blobs/<sha>            redacted bytes by source hash\n  GET    /v1/images                 ?code=&tag=&meta.k=v&sha=&needs_review=\n                                    &limit=&offset=   (browse path, not hot)\n  DELETE /v1/images/<sha>\n  GET    /v1/stats                  aggregate counters + queue depth\n  GET    /v1/health                 unauthenticated liveness\n\nDEPLOYMENT\n  docker compose up -d                 blurd + MinIO (blobs in object storage)\n  docker compose --profile pg    up -d  + Postgres, for the shared metadata store\n  docker compose --profile mongo up -d  + MongoDB, the alternative\n  docker compose --profile scale up -d --scale blurd=3\n  One process per SQLite home: `serve` registers an instance and refuses to\n  start if a peer is heartbeating, because SQLite is a single-writer file.\n  The scope for running several replicas is in spec/distributed.md.\n\nREPLICAS\n  With postgres + s3, several replicas share metadata and blobs. No shared\n  queue: each replica processes what it accepts, any replica serves any result.\n    BLURD_DB_BACKEND=postgres BLURD_DB_DSN=... BLURD_STORAGE_BACKEND=s3\n    docker compose --profile pg --profile scale up -d --scale blurd=3\n  Every job carries the instance that owns it; a reaper reclaims only jobs whose\n  owner has stopped heartbeating, so a restart never seizes a live peer's work.\n  On SIGTERM a replica reports 503 (draining), finishes in-flight jobs for\n  BLURD_DRAIN_SECONDS, then exits. BLURD_HTTP_THREADS bounds concurrent\n  connections, and therefore database connections. See spec/replicas.md.\n\nMETADATA BACKENDS\n  sqlite    a file under $BLURD_HOME     (dev, one container)\n  postgres  a shared service             (several replicas)\n  BLURD_DB_BACKEND=postgres BLURD_DB_DSN=postgresql://user:pass@host/blurd\n  Needs the optional `psycopg[binary]`. Both backends pass the same 112\n  conformance checks; the backend is invisible in behaviour. One process per\n  SQLITE home is still enforced -- postgres lifts that, but the leases and\n  pooling in spec/distributed.md step 2 must land before several replicas are\n  safe. See spec/postgres.md.\n\nSTORAGE BACKENDS\n  local  filesystem under $BLURD_HOME/blobs   (dev, one container)\n  s3     any S3-compatible object store       (Docker/k8s)\n  Selected by BLURD_STORAGE_BACKEND, with BLURD_S3_ENDPOINT / _BUCKET /\n  _ACCESS_KEY / _SECRET_KEY / _PREFIX. The storage key is the same in both, so\n  switching rewrites no database rows; `blurd migrate-blobs --to s3` copies an\n  existing instance over and is resumable. Blobs are ~95% of stored bytes:\n  moving them takes an instance from ~360 GB per million images to ~19 GB.\n  Cost: about +1.2 ms per read against MinIO on localhost. See spec/storage.md.\n\nRESOURCES AND SIZING\n  workers defaults to \"auto\": the lower of what CPU and MEMORY allow, read from\n  the cgroup when running in a container (the host's figures are a fiction\n  there). Memory is ~130 MB base + ~130 MB per worker, fitted to measurement.\n  An explicit BLURD_WORKERS=N is honoured, with a warning at startup if it will\n  not fit -- better than finding out from the OOM killer mid-job.\n  `blurd doctor` prints the whole budget. Re-measure: bash bench/memory.sh\n  Freed memory is returned to the OS between jobs (BLURD_MALLOC_TRIM=0 to\n  disable): -22% peak RSS for -5% throughput. See spec/resources.md.\n\nCAPACITY (measured, 4 physical cores, no GPU)\n  ~3.4 images/second per physical core at 1280px; 13.4 img/s on this box,\n  48,300 images/hour. Detection is ~110-130ms and nearly size-independent\n  because it runs on a 1280px copy. The work is CPU-bound: throughput flattens\n  after ~4 workers, and a process pool beats threads by only 14%.\n  Storage: ~333 KB/image blob + ~19 KB database. 1M images is ~360 GB.\n  GPU is out of scope: blurd targets CPU-only VMs, so capacity is bought in\n  cores and sizing is linear.\n  Reads peak ~800-1200/s; cache in front for read-heavy loads.\n  Tune with: blurd config set workers N | blurd config set ort_threads N\n  Benchmark it yourself: python3 bench/throughput.py --url ... --api-key ...\n  Scaling, and whether blurd can run as a cluster: spec/capacity.md\n\nLISTING AT SCALE (measured, 50k images + 50k jobs)\n  Listings are cursor-paginated, not offset-paginated: pass the next_cursor\n  from one page as ?cursor= on the next. Page 1000 costs what page 1 costs,\n  and rows cannot be skipped or repeated by concurrent inserts.\n  ?sort= created|faces|plates|size|review with ?direction=asc|desc -- each is\n  index-backed. Date range is ?since=&until= (RFC3339).\n  Totals stop counting at 10000 and set total_capped=true; the total is\n  returned on the first page only, because paging cannot change it.\n  A full dashboard grid page (list + 24 thumbnails + header) costs ~34 ms.\n  See spec/scaling.md.\n\nLOOKUP COST (measured, 50k stored images)\n  by unique code      ~13 us   indexed, use this in the user-facing path\n  by full sha256      ~10 us   indexed\n  by metadata k=v     ~7 ms    matches many rows and sorts; a browse path\n  by sha PREFIX       ~6 ms    a scan; convenience only\n\nSCOPED KEYS (running several apps off one instance)\n  blurd keys add app-acme --scope-tag acme\n  blurd keys add app-fleet  --scope-meta appId=fleet\n  A scope is a conjunction: every constraint must hold. It defines a tenant, so\n  codes and labels are namespaced by it. Out-of-scope reads return 404, not 403,\n  so a scoped key cannot probe for what exists. Writes contradicting the scope\n  fail with 86/scope_violation. /v1/stats is computed within the scope.\n  A scoped delete releases only that tenant's claim on shared bytes.\n\nUNIQUE CODES (external ids)\n  --code / external_id is the producer's own identifier, usually the filename.\n  It is a PRIMARY KEY of (tenant, external_id): one code points at exactly one\n  source image within a tenant, and several codes may point at the same one\n  (identical bytes are stored once).\n  Re-submitting a known code with on_conflict=reuse (the default) returns a\n  finished job immediately without fetching or decoding anything.\n  A known code with DIFFERENT bytes fails with 94/resource_conflict unless you\n  pass on_conflict=replace -- silently repointing it would make a consumer's\n  cached URL start returning a different photo.\n\nCACHING / DEDUP\n  The cache key is (sha256 of source bytes, profile_hash), never the sha alone.\n  profile_hash covers the models, thresholds, redaction mode and output\n  settings, so upgrading a model produces a new artifact instead of silently\n  serving a stale redaction. Re-submitting a known pair returns\n  \"cached\": true in ~1ms and merges any new tags/metadata.\n\nASYNC DURABILITY\n  A queued `url` job survives a daemon restart: the daemon can re-fetch it.\n  A queued raw-upload job does NOT -- its bytes are held in memory and never\n  spooled to disk, because \"the source image is never written to disk\" is the\n  point of this service. Those jobs fail on restart with a recoverable error\n  telling the producer to resubmit.\n\nLIMITS YOU SHOULD KNOW\n  Detection recall is not 100%. Artifacts with no detections, or with a\n  detection below 0.55, are flagged needs_review=true so a human can check\n  them in the dashboard. Treat blurd as a strong first pass, not a guarantee."
+}

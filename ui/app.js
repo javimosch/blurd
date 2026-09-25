@@ -765,6 +765,56 @@ async function loadApiDocs() {
   }
 }
 
+/* The CLI tab renders the embedded guide (src/guide.py — the same document
+   `blurd guide` and --help-json emit) pre-compiled to /cli-docs.json by
+   spec/render_cli_docs.py, kept honest by tests/cli_docs_drift.py. */
+async function loadCliDocs() {
+  const el = $("cli");
+  try {
+    const doc = await (await fetch("/cli-docs.json")).json();
+    const g = doc.guide, cat = doc.catalog;
+    el.innerHTML = `<div class="notice">
+        <b>The blurd CLI.</b> ${esc(g.one_liner)}<br><br>
+        <b>The model:</b> ${esc(g.model)}<br><br>
+        <b>The loop:</b> ${esc(g.loop)}<br><br>
+        Every command runs three ways unchanged — locally in-process,
+        via <code>--remote &lt;url&gt; --api-key &lt;key&gt;</code> against a
+        daemon like this one, or inside the dashboard's api tab endpoints.
+      </div>
+      <h3 class="api-group">commands</h3>
+      <table><thead><tr><th>command</th><th>does</th></tr></thead><tbody>` +
+      Object.entries(cat.commands).map(([c, d]) =>
+        `<tr><td class="code">blurd ${esc(c)}</td><td>${esc(d)}</td></tr>`).join("") +
+      `</tbody></table>
+      <details class="example" open><summary>full reference — every flag,
+        as the binary prints it (blurd guide)</summary>
+        <pre>${esc(doc.text)}</pre></details>
+      <h3 class="api-group">concepts</h3>
+      <table><thead><tr><th>term</th><th>meaning</th></tr></thead><tbody>` +
+      Object.entries(g.concepts || {}).map(([k, v]) =>
+        `<tr><td class="code">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("") +
+      `</tbody></table>
+      <h3 class="api-group">global flags & output</h3>
+      <div class="qdepth">${cat.global_flags.map((f) =>
+        `<span class="pill">${esc(f)}</span>`).join(" ")}</div>
+      <div class="qdepth">output formats: ${cat.output_formats.map(esc).join(", ")}
+        — JSON is the contract (<code>{"version","data","timestamp"}</code> on
+        stdout; logs and progress on stderr, always).</div>
+      <h3 class="api-group">examples</h3>
+      <pre>${(g.examples || []).map(esc).join("\n")}</pre>
+      <h3 class="api-group">gotchas</h3>
+      <ul class="gotchas">${(g.gotchas || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+      <h3 class="api-group">exit codes</h3>
+      <div class="qdepth">exit code == error.code — one vocabulary for CLI and API.</div>
+      <table><thead><tr><th>code</th><th>type</th></tr></thead><tbody>` +
+      Object.entries(cat.exit_codes).map(([c, t]) =>
+        `<tr><td class="id">${esc(c)}</td><td class="code">${esc(t)}</td></tr>`).join("") +
+      "</tbody></table>";
+  } catch (err) {
+    el.innerHTML = `<div class="empty">could not load /cli-docs.json — ${esc(err.message)}</div>`;
+  }
+}
+
 document.querySelectorAll(".tab").forEach((t) => {
   t.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
@@ -775,6 +825,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     $("keys").hidden = view !== "keys";
     $("public").hidden = view !== "public";
     $("api").hidden = view !== "api";
+    $("cli").hidden = view !== "cli";
     $("grid").hidden = !images;
     // By id, not by class: `#jobs` sits BEFORE the images pager in the DOM, so
     // querySelector(".pager") picks the jobs one and hides it exactly when the
@@ -786,6 +837,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     else if (view === "jobs") loadJobs();
     else if (view === "public") loadPublic();
     else if (view === "api") loadApiDocs();
+    else if (view === "cli") loadCliDocs();
     else loadKeys();
   };
 });

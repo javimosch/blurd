@@ -19,3 +19,4 @@ jobs:
       - run: python tests/seam_check.py
       - run: python tests/schema_drift.py
       - run: python tests/api_docs_drift.py
+      - run: python tests/cli_docs_drift.py
