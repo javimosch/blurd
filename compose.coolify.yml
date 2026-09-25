@@ -52,15 +52,18 @@ services:
       - mongo-data:/data/db
 
   minio:
-    image: minio/minio:latest
-    command: server /data
+    # minio/minio and quay.io/minio no longer allow anonymous pulls; the
+    # Bitnami legacy build is the same server on docker.io.
+    image: bitnamilegacy/minio:latest
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_DEFAULT_BUCKETS: blurd
     volumes:
-      - minio-data:/data
+      - minio-data:/bitnami/minio/data
 
-  # MinIO has no "create bucket on boot" flag; one shot with the client.
+  # Belt and suspenders: MINIO_DEFAULT_BUCKETS should create it, but make
+  # sure the bucket exists before blurd starts.
   createbucket:
     image: amazon/aws-cli:2.22.0
     entrypoint: >
