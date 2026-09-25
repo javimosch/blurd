@@ -46,6 +46,26 @@ function csv(v) {
 function dayStart(v) { return v ? v + "T00:00:00Z" : null; }
 function dayEnd(v) { return v ? v + "T23:59:59Z" : null; }
 
+/* "Get this via API": renders the exact /v1 call that reproduces what the
+   screen shows. Deliberately copy-paste only — the dashboard session can never
+   be an API credential (AGENTS.md rule 9), so snippets carry a key placeholder
+   rather than a real one. */
+const API_KEY_VAR = "$BLURD_KEY";
+function apiSheet(title, blocks) {
+  $("api-title").textContent = title;
+  $("api-code").textContent = blocks.join("\n\n");
+  $("api-sheet").hidden = false;
+}
+function apiGet(path) {
+  return `curl -H "Authorization: Bearer ${API_KEY_VAR}" "${location.origin}${path}"`;
+}
+const API_KEY_NOTE =
+  `# The dashboard login is NOT an API credential — /v1 needs its own Bearer key.
+# mint one:  blurd keys add <name>   (or dashboard → keys, if enabled)`;
+$("api-copy").onclick = () =>
+  navigator.clipboard?.writeText($("api-code").textContent);
+$("api-close").onclick = () => { $("api-sheet").hidden = true; };
+
 function filterQuery() {
   const q = new URLSearchParams();
   csv($("f-tag").value).forEach((t) => q.append("tag", t));
@@ -130,6 +150,30 @@ async function load() {
     state.shown = data.items.length;
     state.nextCursor = data.next_cursor;
     data.items.forEach((i) => grid.appendChild(card(i)));
+    // Empty has two causes: no match under active filters, or a fresh install
+    // with nothing stored. The second is the onboarding moment — show the two
+    // submit calls a human needs, not just "nothing here".
+    if (data.items.length === 0) {
+      const filtered = $("f-review").checked ||
+        ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"]
+          .some((i) => $(i).value.trim());
+      $("empty").innerHTML = (filtered || state.total > 0)
+        ? "Nothing matches these filters."
+        : `<div style="margin-bottom:14px">No images yet — submit the first one:</div>
+           <pre style="text-align:left;max-width:720px;margin:0 auto 12px">${
+             esc('# upload bytes\ncurl -X POST -H "Authorization: Bearer ' + API_KEY_VAR +
+               '" --data-binary @photo.jpg \\\n  -H "Content-Type: image/jpeg" \\\n  "' +
+               location.origin + '/v1/images?code=IMG_0001.jpg&tags=demo"')
+           }</pre>
+           <pre style="text-align:left;max-width:720px;margin:0 auto 12px">${
+             esc('# or hand blurd a URL to fetch itself\ncurl -X POST -H "Authorization: Bearer ' +
+               API_KEY_VAR + '" -H "Content-Type: application/json" \\\n  -d \'{"url":"https://example.com/photo.jpg","external_id":"IMG_0001.jpg","tags":["demo"]}\' \\\n  "' +
+               location.origin + '/v1/images"')
+           }</pre>
+           <div>${esc(API_KEY_NOTE.replace(/\n/g, " · "))}</div>
+           <div style="margin-top:10px">Poll the returned job — it settles in a
+             second or two — then refresh this page.</div>`;
+    }
     $("empty").hidden = data.items.length !== 0;
     renderPager(state, { info: "page-info", prev: "prev", next: "next", first: "first" });
     loadFacets();
@@ -225,9 +269,23 @@ async function openDetail(sha, profile) {
     <pre>${esc(JSON.stringify(d.stats, null, 2))}</pre>
     <h3>actions</h3>
     <button class="ghost" id="dl">download</button>
+    <button class="ghost" id="api-det">get via API</button>
     <button class="ghost" id="redact">manual redact</button>
     <button class="danger" id="del">delete</button>`;
   $("dl").onclick = () => window.open(`/ui-api/blobs/${sha}?profile=${profile}`, "_blank");
+  $("api-det").onclick = () => {
+    const prof = `?profile=${profile}`;
+    const blocks = [
+      "# full record\n" + apiGet(`/v1/images/${sha}${prof}`),
+      "# redacted bytes\n" + apiGet(`/v1/blobs/${sha}${prof}`),
+      "# thumbnail\n" + apiGet(`/v1/thumbs/${sha}${prof}`),
+    ];
+    (d.codes || []).forEach((c) => blocks.push(
+      `# by producer unique code "${c}" — the consumer hot path\n` +
+      apiGet(`/v1/blobs/by-code/${encodeURIComponent(c)}${prof}`)));
+    blocks.push(API_KEY_NOTE);
+    apiSheet(`GET /v1 — ${sha.slice(0, 16)}…`, blocks);
+  };
   $("redact").onclick = () => startRedact(sha, profile, d);
   $("del").onclick = async () => {
     if (!confirm("Delete this image, all its artifacts and blobs?")) return;
@@ -651,6 +709,37 @@ function wirePager(p, ids, reload) {
 
 function resetPager(p) { p.stack = []; p.cursor = null; p.nextCursor = null; }
 
+$("f-api").onclick = () => {
+  const q = filterQuery();
+  q.delete("cursor"); // a cursor only means something inside one paging session
+  apiSheet("GET /v1/images — this view, via the API", [
+    apiGet("/v1/images?" + q.toString()),
+    `# every filter box maps to a parameter:
+#   tag (repeatable, ANDed) · meta.<key> · sha (prefix) · code (exact or prefix*)
+#   needs_review=1 · since/until (ISO) · sort+direction · limit
+# next page: pass the response's next_cursor back as ?cursor=`,
+    API_KEY_NOTE,
+  ]);
+};
+$("j-api").onclick = () => {
+  const q = jobQuery();
+  q.delete("cursor");
+  apiSheet("Jobs via /v1 — submit, poll, list", [
+    "# this job list\n" + apiGet("/v1/jobs?" + q.toString()),
+    "# submit an image by URL (202 → job id in Location)\n" +
+    `curl -X POST -H "Authorization: Bearer ${API_KEY_VAR}" ` +
+    `-H "Content-Type: application/json" \\\n` +
+    `  -d '{"url":"https://example.com/photo.jpg","external_id":"IMG_0001.jpg","tags":["demo"]}' \\\n` +
+    `  "${location.origin}/v1/images"`,
+    "# or upload the bytes\n" +
+    `curl -X POST -H "Authorization: Bearer ${API_KEY_VAR}" ` +
+    `--data-binary @photo.jpg -H "Content-Type: image/jpeg" \\\n` +
+    `  "${location.origin}/v1/images?code=IMG_0001.jpg&tags=demo"`,
+    "# long-poll one job until it settles (max 120s)\n" +
+    apiGet("/v1/jobs/<job_id>?wait=30"),
+    API_KEY_NOTE,
+  ]);
+};
 $("apply").onclick = () => { resetPager(state); load(); };
 $("reset").onclick = () => {
   ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) => ($(i).value = ""));

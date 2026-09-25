@@ -37,6 +37,7 @@
   <label class="chk"><input type="checkbox" id="f-review"> needs review only</label>
   <button id="apply">Filter</button>
   <button id="reset" class="ghost">Reset</button>
+  <button id="f-api" class="ghost" title="the /v1 call that reproduces this view">API</button>
   <div id="chips" class="chips"></div>
 </section>
 
@@ -70,6 +71,7 @@
       <select id="j-size"><option>25</option><option>50</option><option>100</option></select></div>
     <button id="j-apply">Filter</button>
     <button id="j-reset" class="ghost">Reset</button>
+    <button id="j-api" class="ghost" title="the /v1 call that reproduces this view">API</button>
   </div>
   <div id="j-body"></div>
   <div class="pager">
@@ -82,6 +84,17 @@
 <section id="keys" class="jobs" hidden></section>
 <section id="public" class="jobs" hidden></section>
 <div id="empty" class="empty" hidden>Nothing matches these filters.</div>
+
+<div id="api-sheet" class="api-sheet" hidden>
+  <div class="api-head">
+    <span id="api-title"></span>
+    <span>
+      <button class="ghost" id="api-copy">copy</button>
+      <button class="ghost" id="api-close">close</button>
+    </span>
+  </div>
+  <pre id="api-code"></pre>
+</div>
 <div class="pager" id="img-pager">
   <button id="first" class="ghost">&laquo; first</button>
   <button id="prev" class="ghost">&larr; prev</button>
