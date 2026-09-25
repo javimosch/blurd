@@ -63,12 +63,14 @@ services:
       - minio-data:/bitnami/minio/data
 
   # Belt and suspenders: MINIO_DEFAULT_BUCKETS should create it, but make
-  # sure the bucket exists before blurd starts.
+  # sure the bucket exists before blurd starts. head-bucket first — `mb` on
+  # an existing bucket errors, which would spin this loop forever.
   createbucket:
     image: amazon/aws-cli:2.22.0
     entrypoint: >
       /bin/sh -c "until aws --endpoint-url http://minio:9000
-      --region us-east-1 s3 mb s3://blurd; do sleep 3; done &&
+      --region us-east-1 s3api head-bucket --bucket blurd 2>/dev/null ||
+      aws --endpoint-url http://minio:9000 --region us-east-1 s3 mb s3://blurd; do sleep 3; done &&
       echo bucket-ready"
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
