@@ -18,6 +18,10 @@ services:
         WITH_MONGO: ${WITH_MONGO:-1}
     expose:
       - 8770
+    # Direct host port for LAN/tailscale producers (the Traefik vhost only
+    # answers on the public edge). rbm21 reaches 100.108.74.86:18770.
+    ports:
+      - "18770:8770"
     stop_grace_period: 40s
     depends_on:
       mongo:
