@@ -1,0 +1,1310 @@
+{
+  "generated_from": "spec/openapi.yaml",
+  "title": "blurd",
+  "endpoints": [
+    {
+      "path": "/v1/health",
+      "method": "GET",
+      "group": "open \u2014 no API key by design",
+      "summary": "Liveness. Unauthenticated.",
+      "description": "",
+      "auth": "none",
+      "params": [],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "healthy"
+        }
+      ]
+    },
+    {
+      "path": "/_health",
+      "method": "GET",
+      "group": "open \u2014 no API key by design",
+      "summary": "Daemon liveness (cli-daemon-spec). Answers {ok, service, pid}.",
+      "description": "",
+      "auth": "none",
+      "params": [],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "healthy"
+        },
+        {
+          "status": "503",
+          "description": "draining"
+        }
+      ]
+    },
+    {
+      "path": "/_shutdown",
+      "method": "POST",
+      "group": "operator \u2014 instance management",
+      "summary": "Stop the daemon (cli-daemon-spec). Loopback clients only.",
+      "description": "",
+      "auth": "none",
+      "params": [],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "{stopping:true} then the process exits"
+        },
+        {
+          "status": "401",
+          "description": "non-loopback caller"
+        }
+      ]
+    },
+    {
+      "path": "/v1/feedback",
+      "method": "POST",
+      "group": "open \u2014 no API key by design",
+      "summary": "Submit feedback (cli-feedback-spec). Open intake.",
+      "description": "",
+      "auth": "none",
+      "params": [],
+      "body": {
+        "content_types": [
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "id",
+            "type": "string",
+            "required": false,
+            "description": "client-generated idempotency key"
+          },
+          {
+            "name": "kind",
+            "type": "string",
+            "required": false,
+            "description": "bug | idea | praise | note"
+          },
+          {
+            "name": "message",
+            "type": "string",
+            "required": true,
+            "description": ""
+          },
+          {
+            "name": "context",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "reporter",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "version",
+            "type": "string",
+            "required": false,
+            "description": ""
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "200",
+          "description": "{ok:true, id, stored:true}; a duplicate id is also a success"
+        },
+        {
+          "status": "400",
+          "description": "missing/empty message, or invalid JSON"
+        },
+        {
+          "status": "413",
+          "description": "body exceeds 16 KB"
+        },
+        {
+          "status": "429",
+          "description": "rate limited (30/min per IP)"
+        }
+      ]
+    },
+    {
+      "path": "/v1/feedback",
+      "method": "GET",
+      "group": "operator \u2014 instance management",
+      "summary": "Read feedback, newest first. Operator keys only.",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 50,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "{ok:true, feedback:[...]}"
+        },
+        {
+          "status": "401",
+          "description": "Missing or invalid API key"
+        },
+        {
+          "status": "403",
+          "description": "Scoped key: reading feedback is operator-only"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images",
+      "method": "POST",
+      "group": "producer \u2014 submit images, track jobs",
+      "summary": "Submit an image for redaction (asynchronous)",
+      "description": "Always creates a job and returns 202 immediately -- an HTTP request must not have to stay open while an image is fetched and processed. Pass ?wait=N to block for up to N seconds; if the job settles within that window the response is 200 with `result` filled in. If `external_id` is already known and on_conflict=reuse (the default), the job is returned already \"done\" without any fetch or decode.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "code",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "external_id; raw-body form. Often the filename."
+        },
+        {
+          "name": "wait",
+          "in": "query",
+          "required": false,
+          "type": "number",
+          "enum": null,
+          "default": null,
+          "description": "seconds to block, max 120. 0 = return at once."
+        },
+        {
+          "name": "on_conflict",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "reuse",
+            "replace",
+            "reject"
+          ],
+          "default": "reuse",
+          "description": ""
+        },
+        {
+          "name": "tags",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "comma separated (raw-body form)"
+        },
+        {
+          "name": "metadata",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "JSON object (raw-body form)"
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "JSON profile overrides; storage.ttl (seconds, 60-2592000) prunes the blob after the deadline"
+        },
+        {
+          "name": "force",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "1 to bypass the cache"
+        }
+      ],
+      "body": {
+        "content_types": [
+          "image/jpeg",
+          "image/png",
+          "application/octet-stream",
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "url",
+            "type": "string",
+            "required": true,
+            "description": ""
+          },
+          {
+            "name": "external_id",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "on_conflict",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "tags",
+            "type": "string[]",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "metadata",
+            "type": "object",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "profile",
+            "type": "object",
+            "required": false,
+            "description": ""
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "202",
+          "description": "Job accepted; Location header points at /v1/jobs/<id>",
+          "schema": "Job"
+        },
+        {
+          "status": "200",
+          "description": "Job already settled (cache hit, or ?wait covered it)",
+          "schema": "Job"
+        },
+        {
+          "status": "401",
+          "description": "Missing or invalid API key",
+          "schema": "Error"
+        },
+        {
+          "status": "422",
+          "description": "Validation failed (bad image, non-public URL, too large)"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "List stored artifacts",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "tag",
+          "in": "query",
+          "required": false,
+          "type": "string[]",
+          "enum": null,
+          "default": null,
+          "description": "repeatable; ANDed"
+        },
+        {
+          "name": "meta.<key>",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "exact metadata match"
+        },
+        {
+          "name": "sha",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "sha256 prefix"
+        },
+        {
+          "name": "code",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "external id; exact, or a trailing * for a prefix scan"
+        },
+        {
+          "name": "needs_review",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "since",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "until",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "sort",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "created",
+            "faces",
+            "plates",
+            "size",
+            "review"
+          ],
+          "default": "created",
+          "description": ""
+        },
+        {
+          "name": "direction",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "desc",
+            "asc"
+          ],
+          "default": "desc",
+          "description": ""
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "next_cursor from the previous page; keyset pagination, O(1) at any depth"
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 50,
+          "description": ""
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 0,
+          "description": "legacy; prefer cursor -- OFFSET is O(offset) and unstable under concurrent inserts"
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "total, total_capped, count, items[], next_cursor, has_more, sort, direction. `total` stops counting at 10000 (total_capped=true) and is returned only when no cursor was supplied, because paging deeper cannot change it.\n"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images/{sha}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Full record",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "ok",
+          "schema": "Artifact"
+        },
+        {
+          "status": "404",
+          "description": "not found"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images/{sha}",
+      "method": "DELETE",
+      "group": "operator \u2014 instance management",
+      "summary": "Delete an image, its artifacts and its blobs",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "deleted"
+        },
+        {
+          "status": "404",
+          "description": "not found"
+        }
+      ]
+    },
+    {
+      "path": "/v1/blobs/{sha}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Redacted image bytes",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "image/jpeg or image/png"
+        },
+        {
+          "status": "404",
+          "description": "not found"
+        },
+        {
+          "status": "410",
+          "description": "resource_expired: TTL'd blob was pruned; resubmit to regenerate",
+          "schema": "Error"
+        }
+      ]
+    },
+    {
+      "path": "/v1/thumbs/{sha}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Thumbnail for grid views",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "image/jpeg"
+        }
+      ]
+    },
+    {
+      "path": "/v1/jobs",
+      "method": "GET",
+      "group": "producer \u2014 submit images, track jobs",
+      "summary": "List jobs",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "done",
+            "failed"
+          ],
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "code",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "sha",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "source_sha prefix"
+        },
+        {
+          "name": "tag",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "matches the job's submission-time tags snapshot"
+        },
+        {
+          "name": "since",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "until",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "sort",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "created",
+            "duration",
+            "status"
+          ],
+          "default": "created",
+          "description": ""
+        },
+        {
+          "name": "direction",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "desc",
+            "asc"
+          ],
+          "default": "desc",
+          "description": ""
+        },
+        {
+          "name": "cursor",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 50,
+          "description": ""
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 0,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "total, total_capped, count, items[], next_cursor, has_more, queue{}. Items in a LISTING omit `result`; fetch a single job to get it.\n"
+        }
+      ]
+    },
+    {
+      "path": "/v1/jobs/{job_id}",
+      "method": "GET",
+      "group": "producer \u2014 submit images, track jobs",
+      "summary": "Job status, and its result once done",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "wait",
+          "in": "query",
+          "required": false,
+          "type": "number",
+          "enum": null,
+          "default": null,
+          "description": "long-poll up to N seconds (max 120)"
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "ok",
+          "schema": "Job"
+        },
+        {
+          "status": "404",
+          "description": "not found"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images/by-code/{external_id}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Full record, resolved by the producer's unique code",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "external_id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "tenant",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "unscoped keys only: disambiguate a code used by several tenants"
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "ok",
+          "schema": "Artifact"
+        },
+        {
+          "status": "404",
+          "description": "no such external_id in this tenant"
+        },
+        {
+          "status": "409",
+          "description": "unscoped caller: the code is used by several tenants; details.tenants lists them"
+        }
+      ]
+    },
+    {
+      "path": "/v1/blobs/by-code/{external_id}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Redacted image bytes by unique code \u2014 the consumer hot path",
+      "description": "One indexed lookup joined straight to the blob, bypassing JSON record assembly. Measured at ~13 us of query time with 50k images. Responds to If-None-Match with 304; the ETag is the redacted blob's sha256.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "external_id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "image bytes; ETag + Cache-Control set"
+        },
+        {
+          "status": "304",
+          "description": "If-None-Match matched"
+        },
+        {
+          "status": "404",
+          "description": "no such external_id"
+        },
+        {
+          "status": "410",
+          "description": "resource_expired: TTL'd blob was pruned; resubmit to regenerate",
+          "schema": "Error"
+        }
+      ]
+    },
+    {
+      "path": "/v1/thumbs/by-code/{external_id}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Thumbnail by unique code",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "external_id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "image/jpeg"
+        }
+      ]
+    },
+    {
+      "path": "/pub/blobs/{sha}",
+      "method": "GET",
+      "group": "open \u2014 no API key by design",
+      "summary": "Redacted image bytes, no key \u2014 only when a public rule matches",
+      "description": "",
+      "auth": "none",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "profile",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "image bytes; ETag + Cache-Control set"
+        },
+        {
+          "status": "404",
+          "description": "no such image, or no public rule matches it"
+        },
+        {
+          "status": "410",
+          "description": "resource_expired: TTL'd blob was pruned"
+        },
+        {
+          "status": "429",
+          "description": "rate_limited: over 60/min from this address"
+        }
+      ]
+    },
+    {
+      "path": "/ui-api/keys",
+      "method": "GET",
+      "group": "dashboard \u2014 session-authed, not for integrations",
+      "summary": "List API keys (dashboard auth; never returns a usable key)",
+      "description": "",
+      "auth": "none",
+      "params": [],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "keys[], creation_enabled, note"
+        },
+        {
+          "status": "401",
+          "description": "dashboard auth required"
+        }
+      ]
+    },
+    {
+      "path": "/ui-api/keys",
+      "method": "POST",
+      "group": "dashboard \u2014 session-authed, not for integrations",
+      "summary": "Mint an API key (optionally scoped) \u2014 opt-in, gated by a second secret",
+      "description": "Requires dashboard auth, the CSRF token, `dashboard_allow_key_creation`, and the X-Blurd-Admin-Secret header. Disabled by default: a minted key outlives the dashboard password, so this would otherwise make one shared human credential the root of trust for machine access.",
+      "auth": "none",
+      "params": [
+        {
+          "name": "X-Blurd-CSRF",
+          "in": "header",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "X-Blurd-Admin-Secret",
+          "in": "header",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": {
+        "content_types": [
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "type": "string",
+            "required": true,
+            "description": ""
+          },
+          {
+            "name": "scope",
+            "type": "object",
+            "required": false,
+            "description": "omit for an unrestricted key; all constraints are ANDed"
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "201",
+          "description": "the plaintext key (returned exactly once), plus its scope and tenant"
+        },
+        {
+          "status": "401",
+          "description": "missing CSRF token or admin secret"
+        },
+        {
+          "status": "409",
+          "description": "creation is disabled; details.enable says how to turn it on"
+        }
+      ]
+    },
+    {
+      "path": "/ui-api/keys/{key_id}",
+      "method": "DELETE",
+      "group": "dashboard \u2014 session-authed, not for integrations",
+      "summary": "Revoke a key \u2014 always available, effective immediately",
+      "description": "",
+      "auth": "none",
+      "params": [
+        {
+          "name": "key_id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "X-Blurd-CSRF",
+          "in": "header",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "revoked"
+        },
+        {
+          "status": "401",
+          "description": "missing CSRF token"
+        },
+        {
+          "status": "404",
+          "description": "no such key, or already revoked"
+        }
+      ]
+    },
+    {
+      "path": "/ui-api/audit",
+      "method": "GET",
+      "group": "dashboard \u2014 session-authed, not for integrations",
+      "summary": "Recent privileged mutations",
+      "description": "",
+      "auth": "none",
+      "params": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 50,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "at, actor, action, target, source_ip, detail"
+        }
+      ]
+    },
+    {
+      "path": "/v1/stats",
+      "method": "GET",
+      "group": "operator \u2014 instance management",
+      "summary": "Aggregate counters",
+      "description": "",
+      "auth": "api key",
+      "params": [],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, tags[]"
+        }
+      ]
+    }
+  ],
+  "schemas": {
+    "Error": {
+      "fields": [
+        {
+          "name": "ok",
+          "type": "boolean",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error",
+          "type": "object",
+          "required": false,
+          "description": ""
+        }
+      ]
+    },
+    "Job": {
+      "fields": [
+        {
+          "name": "job_id",
+          "type": "string",
+          "required": false,
+          "description": "job_<16 hex>"
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "external_id",
+          "type": "string",
+          "required": false,
+          "description": "the producer's own unique code"
+        },
+        {
+          "name": "source_sha",
+          "type": "string",
+          "required": false,
+          "description": "known only once processed"
+        },
+        {
+          "name": "profile_hash",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "source_kind",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "cached",
+          "type": "boolean",
+          "required": false,
+          "description": "true when nothing was reprocessed"
+        },
+        {
+          "name": "attempts",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "created_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "started_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "finished_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "duration_ms",
+          "type": "number",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "error",
+          "type": "object",
+          "required": false,
+          "description": "same shape as Error.error"
+        },
+        {
+          "name": "result",
+          "type": "Artifact",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "blob_url",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "blob_url_by_code",
+          "type": "string",
+          "required": false,
+          "description": ""
+        }
+      ]
+    },
+    "Artifact": {
+      "fields": [
+        {
+          "name": "source_sha",
+          "type": "string",
+          "required": false,
+          "description": "sha256 of the source bytes"
+        },
+        {
+          "name": "profile_hash",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "cached",
+          "type": "boolean",
+          "required": false,
+          "description": "true when nothing was reprocessed"
+        },
+        {
+          "name": "needs_review",
+          "type": "boolean",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "manual_regions",
+          "type": "object[]",
+          "required": false,
+          "description": "operator-drawn additive masks applied on top of the stored blob via the dashboard; always black, normalized 0..1 coords"
+        },
+        {
+          "name": "blob",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "image",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "codes",
+          "type": "string[]",
+          "required": false,
+          "description": "external ids bound to this source, within the caller's tenant"
+        },
+        {
+          "name": "codes_detail",
+          "type": "object[]",
+          "required": false,
+          "description": "unscoped callers only: which tenant owns each code"
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "metadata",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "detections",
+          "type": "object[]",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "stats",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "created_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "errors",
+          "type": "string[]",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "warnings",
+          "type": "string[]",
+          "required": false,
+          "description": ""
+        }
+      ]
+    }
+  }
+}

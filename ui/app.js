@@ -667,6 +667,101 @@ async function loadPublic() {
   }
 }
 
+/* The API tab renders spec/openapi.yaml pre-compiled to /api-docs.json by
+   spec/render_api_docs.py — no YAML parser ships to the browser, and
+   tests/api_docs_drift.py keeps the JSON honest. It is a reference for humans,
+   not a console: nothing here executes a call. */
+function paramRows(ps) {
+  if (!ps || !ps.length) return "";
+  return `<table><thead><tr><th>param</th><th>in</th><th>type</th>
+    <th>req</th><th></th></tr></thead><tbody>` +
+    ps.map((p) => `<tr>
+      <td class="code">${esc(p.name)}</td><td>${esc(p.in)}</td>
+      <td>${esc(p.type)}${p.enum ? `<div class="enum">${esc(p.enum.join(" | "))}</div>` : ""}${
+        p.default !== undefined && p.default !== null
+          ? `<div class="enum">default ${esc(String(p.default))}</div>` : ""}</td>
+      <td>${p.required ? '<span class="pill warn">yes</span>' : ""}</td>
+      <td>${esc(p.description)}</td></tr>`).join("") +
+    "</tbody></table>";
+}
+
+function bodyRows(b) {
+  if (!b) return "";
+  return `<h4>request body — ${b.content_types.map(esc).join(", ")}</h4>` +
+    (b.fields ? `<table><thead><tr><th>field</th><th>type</th><th>req</th><th></th></tr>
+      </thead><tbody>` +
+      b.fields.map((f) => `<tr><td class="code">${esc(f.name)}</td>
+        <td>${esc(f.type)}</td>
+        <td>${f.required ? '<span class="pill warn">yes</span>' : ""}</td>
+        <td>${esc(f.description)}</td></tr>`).join("") +
+      "</tbody></table>"
+    : `<div class="qdepth">raw image bytes</div>`);
+}
+
+function responseRows(rs, schemas) {
+  if (!rs || !rs.length) return "";
+  return `<table><thead><tr><th>status</th><th>shape</th><th>meaning</th></tr>
+    </thead><tbody>` +
+    rs.map((r) => {
+      let shape = "";
+      if (r.schema) shape = `<a class="schemaref" href="#api-schema-${esc(r.schema)}">${esc(r.schema)}</a>`;
+      else if (r.fields) shape = r.fields.map((f) => esc(f.name)).join(", ");
+      return `<tr><td class="id">${esc(r.status)}</td><td>${shape}</td>
+        <td>${esc(r.description)}</td></tr>`;
+    }).join("") + "</tbody></table>";
+}
+
+async function loadApiDocs() {
+  const el = $("api");
+  try {
+    const doc = await (await fetch("/api-docs.json")).json();
+    const groups = {};
+    doc.endpoints.forEach((e) => (groups[e.group] = groups[e.group] || []).push(e));
+    const order = ["producer — submit images, track jobs",
+                   "consumer — fetch redacted output",
+                   "open — no API key by design",
+                   "operator — instance management",
+                   "dashboard — session-authed, not for integrations"];
+    el.innerHTML = `<div class="notice">
+        <b>Machine API reference</b> — generated from <code>spec/openapi.yaml</code>,
+        the same file the Go/machin ports implement. Every call is JSON in,
+        JSON out; errors share one typed vocabulary with the CLI. All
+        <code>/v1</code> calls need <code>Authorization: Bearer &lt;key&gt;</code>
+        — a scoped key only ever sees its own tenant's rows, and out-of-scope
+        reads answer 404, never 403.
+        Mint keys in the <b>keys</b> tab or with <code>blurd keys add</code>.
+      </div>` +
+      order.filter((g) => groups[g]).map((g) =>
+        `<h3 class="api-group">${esc(g)}</h3>` +
+        groups[g].map((e) => `<div class="endpoint">
+          <div class="ep-head">
+            <span class="method ${e.method.toLowerCase()}">${e.method}</span>
+            <code class="ep-path">${esc(e.path)}</code>
+            <span class="ep-auth ${e.auth === "none" ? "open" : ""}">${esc(e.auth)}</span>
+          </div>
+          ${e.summary ? `<div class="ep-summary">${esc(e.summary)}</div>` : ""}
+          ${e.description ? `<div class="ep-desc">${esc(e.description)}</div>` : ""}
+          ${paramRows(e.params)}
+          ${bodyRows(e.body)}
+          ${e.responses && e.responses.length ? "<h4>responses</h4>" + responseRows(e.responses, doc.schemas) : ""}
+        </div>`).join("")).join("") +
+      (Object.keys(doc.schemas || {}).length
+        ? `<h3 class="api-group">response schemas</h3>` +
+          Object.entries(doc.schemas).map(([name, s]) => `<div class="endpoint">
+            <div class="ep-head"><code class="ep-path" id="api-schema-${esc(name)}">${esc(name)}</code></div>
+            <table><thead><tr><th>field</th><th>type</th><th>req</th><th></th></tr>
+              </thead><tbody>` +
+            s.fields.map((f) => `<tr><td class="code">${esc(f.name)}</td>
+              <td>${esc(f.type)}</td>
+              <td>${f.required ? '<span class="pill warn">yes</span>' : ""}</td>
+              <td>${esc(f.description)}</td></tr>`).join("") +
+            "</tbody></table></div>").join("")
+        : "");
+  } catch (err) {
+    el.innerHTML = `<div class="empty">could not load /api-docs.json — ${esc(err.message)}</div>`;
+  }
+}
+
 document.querySelectorAll(".tab").forEach((t) => {
   t.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
@@ -676,6 +771,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     $("jobs").hidden = view !== "jobs";
     $("keys").hidden = view !== "keys";
     $("public").hidden = view !== "public";
+    $("api").hidden = view !== "api";
     $("grid").hidden = !images;
     // By id, not by class: `#jobs` sits BEFORE the images pager in the DOM, so
     // querySelector(".pager") picks the jobs one and hides it exactly when the
@@ -686,6 +782,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     if (images) load();
     else if (view === "jobs") loadJobs();
     else if (view === "public") loadPublic();
+    else if (view === "api") loadApiDocs();
     else loadKeys();
   };
 });

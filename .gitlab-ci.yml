@@ -10,10 +10,11 @@ unit-tests:
   variables:
     CI: "true"
   script:
-    - pip install --quiet pytest
+    - pip install --quiet pytest pyyaml
     - python -m pytest tests/unit -q
     - python tests/seam_check.py
     - python tests/schema_drift.py
+    - python tests/api_docs_drift.py
   timeout: 10m
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
