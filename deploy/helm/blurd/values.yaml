@@ -1,0 +1,269 @@
+# blurd — Helm values
+#
+# The defaults here describe a SINGLE replica on SQLite, which is the safe
+# starting point and NOT the production shape. Read `db` and `storage` below
+# before scaling: the chart refuses combinations that would corrupt data rather
+# than letting them fail at 3am.
+
+replicaCount: 1
+
+image:
+  repository: blurd
+  tag: ""                      # defaults to .Chart.appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}              # e.g. IRSA / Workload Identity for S3 access
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # blurd writes models and, on sqlite, its db
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8770
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations:
+    # blurd accepts bodies up to MAX_BODY (64 MB, src/server.py). An ingress
+    # with a smaller limit rejects large uploads with a 413 that never reaches
+    # blurd, so this must agree with it.
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    # A submission may long-poll with ?wait=120.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "180"
+  hosts:
+    - host: blurd.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- resources ---------------------------------------------------------------
+#
+# THESE ARE LOAD-BEARING, not boilerplate.
+#
+# blurd sizes its own worker pool from the cgroup: it reads `memory.max` and
+# `cpu.max`, not the node's figures, because inside a container the node's
+# figures are a fiction. With NO limits set, the cgroup reports "max" and blurd
+# falls back to the NODE's memory and cores -- so a pod on a 64 GB node starts
+# as many workers as the node could feed, and is then OOM-killed against a
+# limit it never saw.
+#
+# The measured model (spec/resources.md, fitted at 4000 px):
+#
+#     peak resident  ~=  120 MB  +  90 MB x workers  +  queue budget
+#
+# so the memory limit is what chooses the worker count:
+#
+#     512Mi -> 3 workers    1Gi -> 7 workers    2Gi -> 7 workers + deeper queue
+#
+# Throughput is ~3.4 images/s per physical core; blurd is CPU-bound.
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 1Gi
+
+# Worker and queue sizing. Leave these empty to let blurd size itself from the
+# limits above -- which is the recommended setting and the one the measurements
+# support. Set them only to override deliberately.
+workers: ""                    # "" => auto
+httpThreads: ""                # "" => auto (4 per worker, capped at 32)
+queueMax: ""                   # "" => 1000 jobs
+queueMaxBytes: ""              # "" => auto, derived from what is left after workers
+
+# onnxruntime's CPU tensor arena. Off by default and it should stay off: it
+# costs ~40 MB per worker for no reliable throughput gain, and OOM-killed a
+# 512 MB container that completed 30/30 images without it.
+ortArena: false
+
+# Hand freed memory back to the OS between jobs. Measured as a material
+# reduction in peak RSS at no throughput cost.
+mallocTrim: true
+
+# --- lifecycle ---------------------------------------------------------------
+#
+# On SIGTERM blurd reports 503 on /v1/health -- so the readiness probe removes
+# it from the Service endpoints -- and then finishes what it has already
+# started. Queued UPLOADS live in the accepting replica's memory (blurd never
+# spools source bytes to disk), so a pod killed before it drains loses them and
+# the producer is told to resubmit.
+#
+# terminationGracePeriodSeconds MUST exceed drainSeconds; the chart refuses
+# otherwise.
+drainSeconds: 20
+terminationGracePeriodSeconds: 40
+
+livenessProbe:
+  # Deliberately tolerant: a busy replica is not a broken one, and restarting it
+  # mid-job loses queued uploads for nothing.
+  initialDelaySeconds: 20
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+readinessProbe:
+  # Deliberately twitchy: this is the drain signal. 503 here is how a draining
+  # or overloaded replica gets taken out of rotation.
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+startupProbe:
+  # Models are fetched by an init container, but a cold ONNX session still
+  # takes a moment. This is what keeps the liveness probe from firing during it.
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 60         # 5 minutes
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    # Never take a replica away before its replacement is ready: queued uploads
+    # only exist in memory.
+    maxUnavailable: 0
+    maxSurge: 1
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  # CPU, because blurd is CPU-bound: ~3.4 images/s per physical core.
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# --- models ------------------------------------------------------------------
+#
+# The detector models are NOT baked into the image: one carries a GPL-3.0
+# lineage and redistributing it inside an image is a licence decision, not a
+# packaging one (see spec/ and the README).
+models:
+  # An init container fetches them into a volume shared with the main
+  # container. Per-pod, so each pod fetches once at start.
+  initContainer:
+    enabled: true
+  # For an air-gapped cluster, or to avoid N pods each fetching: pre-populate a
+  # ReadOnlyMany volume and point at it. Set initContainer.enabled=false too.
+  existingClaim: ""
+  # Where the models live inside the container.
+  mountPath: /var/lib/blurd/models
+
+# --- persistence -------------------------------------------------------------
+#
+# Needed in two cases:
+#   * sqlite with local blobs -- the single-replica shape, to survive a restart
+#   * several replicas with local blobs -- which requires a SHARED (RWX) volume
+# A deployment on object storage needs no PVC at all.
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  # Is this volume readable and writable by every replica at once?
+  #
+  # ReadWriteMany implies it, so this is only needed for an `existingClaim`
+  # whose access mode the chart cannot inspect. Setting it wrongly is the one
+  # way to get the split-blob failure back: metadata found, blob 404, on
+  # whichever replica did not process the image.
+  shared: false
+
+# --- metadata backend --------------------------------------------------------
+db:
+  # sqlite | postgres | mongo
+  #
+  # sqlite is a single-writer FILE. Two replicas on one home is silent
+  # corruption, so blurd refuses to start a second instance against it -- and
+  # this chart refuses to render replicaCount > 1 with it, which is a better
+  # place to find out.
+  backend: sqlite
+
+  # postgres: postgresql://user:pass@host:5432/blurd
+  # mongo:    mongodb://user:pass@host:27017/?authSource=admin
+  #
+  # Prefer existingSecret: a DSN carries a password, and a plain `dsn` here
+  # lands in the release values, which are readable by anyone who can read
+  # secrets in the namespace -- and in your git history.
+  dsn: ""
+  database: blurd              # mongo only
+
+  existingSecret: ""
+  existingSecretKey: dsn
+
+# --- blob storage ------------------------------------------------------------
+storage:
+  # local | s3
+  #
+  # `local` works with several replicas too, but ONLY on a shared volume --
+  # see persistence.shared. Measured: three replicas on one shared volume pass
+  # all 113 conformance checks; with a volume each, blob reads 404 on whichever
+  # replica did not process the image.
+  #
+  # Blobs are ~95% of the stored bytes: ~333 kB per image against ~19 kB of
+  # metadata. Moving them to object storage takes an instance's stateful
+  # footprint from ~360 GB per million images to ~19 GB, and is what lets more
+  # than one replica serve the same data.
+  backend: local
+
+  s3:
+    endpoint: ""               # e.g. http://minio.minio.svc:9000
+    bucket: blurd
+    region: us-east-1
+    prefix: ""
+    pathStyle: true            # what MinIO and most self-hosted gateways expect
+    # Credentials. Prefer existingSecret, or omit both and use IRSA / Workload
+    # Identity via serviceAccount.annotations.
+    accessKey: ""
+    secretKey: ""
+    existingSecret: ""
+    existingSecretAccessKey: accessKey
+    existingSecretSecretKey: secretKey
+
+# --- dashboard ---------------------------------------------------------------
+dashboard:
+  enabled: true
+  user: admin
+  # A shared, human-typed password. It authenticates the human dashboard ONLY
+  # and never a /v1 call -- and an API key never opens the dashboard.
+  password: ""
+  existingSecret: ""
+  existingSecretKey: dashboardPassword
+
+# Extra environment for anything the chart does not model. Every BLURD_* key in
+# src/config.py ENV_OVERRIDES works here.
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

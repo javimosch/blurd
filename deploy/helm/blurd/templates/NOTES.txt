@@ -1,0 +1,63 @@
+blurd {{ .Chart.AppVersion }} — release {{ .Release.Name }} in {{ .Release.Namespace }}
+
+  metadata   {{ .Values.db.backend }}
+  blobs      {{ .Values.storage.backend }}
+  replicas   {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}–{{ .Values.autoscaling.maxReplicas }} (HPA on CPU){{ else }}{{ .Values.replicaCount }}{{ end }}
+  limits     {{ .Values.resources.limits.cpu }} cpu / {{ .Values.resources.limits.memory }} memory
+             -> blurd sizes its own workers from these. Expect roughly
+                120Mi + 90Mi per worker, plus the queue budget.
+
+Check it:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "blurd.fullname" . }} 8770:{{ .Values.service.port }}
+  curl -s localhost:8770/v1/health
+
+Mint an API key (keys live in the metadata store, so any replica can mint one
+and every replica honours it):
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "blurd.fullname" . }} -- \
+    python3 run.py keys add my-app
+
+  # scoped to one project, which namespaces its codes and its labels:
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "blurd.fullname" . }} -- \
+    python3 run.py keys add acme --scope-tag acme
+
+{{- if .Values.dashboard.enabled }}
+
+Dashboard at / with user {{ .Values.dashboard.user }}. Its credentials authenticate
+the dashboard ONLY and never a /v1 call — and an API key never opens the
+dashboard.
+{{- end }}
+
+{{- if eq .Values.db.backend "sqlite" }}
+
+⚠  sqlite: single replica only. SQLite is a single-writer file, so this release
+   cannot be scaled and autoscaling is refused. Move to postgres or mongo
+   before you need a second replica:
+
+     --set db.backend=postgres --set db.existingSecret=blurd-db \
+     --set storage.backend=s3  --set storage.s3.endpoint=http://minio:9000
+{{- end }}
+
+{{- if eq .Values.storage.backend "local" }}
+
+⚠  local blobs: they live in the pod and do not survive it{{ if not .Values.persistence.enabled }} (persistence is off,
+   so a restart loses every redacted image){{ end }}. Object storage is what makes
+   replicas interchangeable, and takes the stateful footprint from ~360 GB per
+   million images to ~19 GB.
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+
+Several replicas: there is no shared job queue and none is needed — each
+replica processes what it accepts and any replica serves any result. Queued
+UPLOADS live in the accepting replica's memory (blurd never writes source
+images to disk), so a pod that is SIGKILLed before draining fails those jobs
+with a recoverable "resubmit". terminationGracePeriodSeconds is
+{{ .Values.terminationGracePeriodSeconds }}s against a {{ .Values.drainSeconds }}s drain.
+{{- end }}
+
+When the queue is full blurd answers 503 with Retry-After — backpressure, not
+failure. Sustained 503s mean the deployment is at capacity: add a replica, or
+slow the producer.

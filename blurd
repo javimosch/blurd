@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# blurd launcher.
+#
+# Picks the first interpreter that actually has what blurd needs. This is not
+# paranoia: on a machine with several Pythons it is common for the one first on
+# PATH to be built without _sqlite3, or to be missing cv2 -- and the resulting
+# ImportError says nothing useful about which of the five pythons to fix.
+set -euo pipefail
+
+# cv2 logs a harmless "Targets are not supported by the new graph engine"
+# notice on every YuNet load; keep stderr useful.
+export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+pick() {
+  for py in "${BLURD_PYTHON:-}" python3.11 python3.12 python3 /usr/bin/python3; do
+    [ -n "$py" ] || continue
+    command -v "$py" >/dev/null 2>&1 || continue
+    if "$py" -c "import sqlite3, cv2, numpy, onnxruntime" >/dev/null 2>&1; then
+      echo "$py"; return 0
+    fi
+  done
+  return 1
+}
+
+PY="$(pick || true)"
+if [ -z "$PY" ]; then
+  cat >&2 <<'MSG'
+{"ok":false,"error":{"code":110,"type":"missing_dependencies","message":"No Python interpreter found with sqlite3, cv2, numpy and onnxruntime","recoverable":false,"suggestions":["pip install opencv-python-headless onnxruntime numpy","Set BLURD_PYTHON=/path/to/python3","Note: a Python built without _sqlite3 will not work"]}}
+MSG
+  exit 110
+fi
+exec "$PY" "$HERE/run.py" "$@"

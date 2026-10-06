@@ -1,0 +1,235 @@
+{{- include "blurd.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "blurd.fullname" . }}
+  labels:
+    {{- include "blurd.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "blurd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when configuration changes; otherwise a `helm upgrade`
+        # that only edits the ConfigMap leaves every replica running the old
+        # settings, because blurd reads its configuration once at startup.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if eq (include "blurd.createSecret" .) "true" }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "blurd.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "blurd.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Must exceed drainSeconds; the chart refuses otherwise. This is the
+      # window in which a replica finishes the images it already accepted.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.models.initContainer.enabled }}
+      initContainers:
+        # The detector models are not baked into the image: one carries a
+        # GPL-3.0 lineage, and redistributing it inside an image is a licence
+        # decision rather than a packaging one.
+        #
+        # Fetching here rather than in the main container means a pod that
+        # cannot get its models never becomes Ready -- instead of starting
+        # healthy and failing every submission, which is far harder to spot.
+        - name: fetch-models
+          image: {{ include "blurd.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python3", "run.py", "models", "pull", "--all"]
+          env:
+            - name: BLURD_HOME
+              value: /var/lib/blurd
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: {{ .Values.models.mountPath }}
+            # The home too, not only the models directory: `models pull`
+            # initialises the whole home (it creates blobs/ alongside models/),
+            # so an init container that mounts only the models volume writes
+            # into the image's root-owned directory and fails with EACCES on
+            # every single deploy.
+            - name: home
+              mountPath: /var/lib/blurd
+              subPath: home
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      {{- end }}
+      containers:
+        - name: blurd
+          image: {{ include "blurd.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--host", "0.0.0.0", "--port", "8770", "--foreground"]
+          ports:
+            - name: http
+              containerPort: 8770
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "blurd.fullname" . }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if ne .Values.db.backend "sqlite" }}
+            - name: BLURD_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.db.existingSecret }}
+                  name: {{ .Values.db.existingSecret }}
+                  key: {{ .Values.db.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "blurd.fullname" . }}
+                  key: dsn
+                  {{- end }}
+            {{- end }}
+            {{- if eq .Values.storage.backend "s3" }}
+            {{- if or .Values.storage.s3.existingSecret .Values.storage.s3.accessKey }}
+            - name: BLURD_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.storage.s3.existingSecret }}
+                  name: {{ .Values.storage.s3.existingSecret }}
+                  key: {{ .Values.storage.s3.existingSecretAccessKey }}
+                  {{- else }}
+                  name: {{ include "blurd.fullname" . }}
+                  key: s3AccessKey
+                  {{- end }}
+            - name: BLURD_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.storage.s3.existingSecret }}
+                  name: {{ .Values.storage.s3.existingSecret }}
+                  key: {{ .Values.storage.s3.existingSecretSecretKey }}
+                  {{- else }}
+                  name: {{ include "blurd.fullname" . }}
+                  key: s3SecretKey
+                  {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.dashboard.enabled }}
+            - name: BLURD_DASHBOARD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.dashboard.existingSecret }}
+                  name: {{ .Values.dashboard.existingSecret }}
+                  key: {{ .Values.dashboard.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "blurd.fullname" . }}
+                  key: dashboardPassword
+                  {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            # Holds the liveness probe off until the first ONNX session is warm.
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
+          livenessProbe:
+            # Tolerant on purpose: a busy replica is not a broken one, and
+            # restarting it mid-job discards queued uploads for nothing.
+            httpGet:
+              path: /v1/health
+              port: http
+            {{- with .Values.livenessProbe }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+            {{- end }}
+          readinessProbe:
+            # This is the drain signal. On SIGTERM blurd answers 503 here, so
+            # the endpoint is withdrawn before it stops accepting -- which is
+            # what makes a rolling update lossless.
+            httpGet:
+              path: /v1/health
+              port: http
+            {{- with .Values.readinessProbe }}
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: {{ .Values.models.mountPath }}
+              {{- if .Values.models.existingClaim }}
+              readOnly: true
+              {{- end }}
+            - name: home
+              mountPath: /var/lib/blurd
+              subPath: home
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: models
+          {{- if .Values.models.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.models.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: home
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "blurd.fullname" .) }}
+          {{- else }}
+          # No PVC: with a shared metadata store and object storage there is
+          # nothing in here worth keeping across a restart.
+          emptyDir: {}
+          {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,11 @@
+.git
+blobs/
+*.db
+*.db-wal
+*.db-shm
+*.onnx
+sidecar/blurd-sidecar
+bench/
+tests/
+docs/
+**/__pycache__
