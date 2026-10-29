@@ -4,7 +4,9 @@ Contract (identical whether called from the CLI, the API or a future port):
     process(cfg, source) -> result dict
 
 The source image is never written to disk. Only sha256(source bytes), the
-dimensions, and the redacted output are persisted.
+dimensions, and the redacted output are persisted -- unless the instance
+enables original retention AND the request passes `keep_original`, in which
+case the source is kept until a deadline (src/originals.py).
 """
 
 import json
@@ -16,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from . import db, detect, fetch, redact, store
+from . import db, detect, fetch, originals, redact, store
 from .canonical import canonical_json, sha256_hex
 from .config import Config
 from .errors import StorageFull, ValidationError
@@ -134,7 +136,8 @@ def _thumb(img: np.ndarray) -> bytes:
 def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = None,
             tags: List[str] = None, metadata: Dict[str, Any] = None,
             overrides: Dict[str, Any] = None, force: bool = False,
-            tenant: str = "global") -> Dict[str, Any]:
+            tenant: str = "global",
+            keep_original: Optional[int] = None) -> Dict[str, Any]:
     timer = _Timer()
     profile = cfg.resolve_profile(overrides)
     phash = Config.hash_of(profile)
@@ -152,6 +155,10 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     blobs = store.build(cfg)
     live = (cached and cached["blob_path"] and not db.artifact_expired(cached))
     if live and not force and blobs.exists(cached["blob_path"]):
+        if keep_original:
+            # The redacted output is cached but these bytes are in hand, so a
+            # retention request is honoured on a cache hit too.
+            originals.retain(cfg, conn, blobs, sha, raw, mime, keep_original)
         db.merge_tags(conn, sha, tags or [], tenant)
         db.merge_metadata(conn, sha, metadata or {}, tenant)
         db.touch_image(conn, sha)
@@ -165,6 +172,11 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     img = decode(raw, int(cfg.get("fetch.max_pixels", 50_000_000)))
     timer.mark("decode_ms", t0)
     height, width = img.shape[:2]
+    if keep_original:
+        # After decode, so only a real image is retained; before detection,
+        # so the bytes can be dropped now rather than held through the
+        # pipeline. A later failure leaves an original that the TTL prunes.
+        originals.retain(cfg, conn, blobs, sha, raw, mime, keep_original)
     del raw  # the source bytes are not kept a moment longer than needed
 
     dets = run_detectors(cfg, img, profile, timer)
@@ -363,6 +375,8 @@ def artifact_result(cfg: Config, conn, row, cached: bool,
         "metadata": db.metadata_of(conn, sha, tenant),
         "detections": db.detections_of(conn, row["id"]),
         "manual_regions": _manual_regions(row),
+        # Present only while an opt-in retained original is live.
+        "original": originals.info(cfg, conn, sha),
         "stats": _json.loads(row["stats_json"]),
         "created_at": row["created_at"],
         "expires_at": (row["expires_at"] if "expires_at" in row.keys()

@@ -76,6 +76,7 @@ GROUPS = {
         "/v1/images/{sha}": ["get"],
         "/v1/blobs/{sha}": ["get"],
         "/v1/thumbs/{sha}": ["get"],
+        "/v1/originals/{sha}": ["get"],
         "/v1/images/by-code/{external_id}": ["get"],
         "/v1/blobs/by-code/{external_id}": ["get"],
         "/v1/thumbs/by-code/{external_id}": ["get"],

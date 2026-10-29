@@ -220,6 +220,15 @@
           "description": "JSON object (raw-body form)"
         },
         {
+          "name": "keep_original",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": null,
+          "description": "seconds to retain the SOURCE image (60..originals.max_ttl, default cap 30 days). Opt-in; refused with 422 unless the instance enables originals. Also accepted as a JSON body field. Not part of profile_hash."
+        },
+        {
           "name": "profile",
           "in": "query",
           "required": false,
@@ -568,6 +577,63 @@
         {
           "status": "410",
           "description": "resource_expired: TTL'd blob was pruned; resubmit to regenerate",
+          "schema": "Error"
+        }
+      ]
+    },
+    {
+      "path": "/v1/originals/{sha}",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Opt-in retained source image bytes",
+      "description": "Readable by any key whose scope can read the redacted image, or with no key via a signed url (exp + sig) when originals.url_mode=signed. Sent with Cache-Control no-store.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "full 64-hex source sha"
+        },
+        {
+          "name": "exp",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": null,
+          "description": "signed mode: unix expiry"
+        },
+        {
+          "name": "sig",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "signed mode: HMAC-SHA256 hex"
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "the original bytes, as submitted"
+        },
+        {
+          "status": "401",
+          "description": "missing key, or invalid/expired signature"
+        },
+        {
+          "status": "404",
+          "description": "never retained, out of scope, or the image was deleted"
+        },
+        {
+          "status": "410",
+          "description": "resource_expired: retention deadline passed",
           "schema": "Error"
         }
       ]
@@ -1332,6 +1398,42 @@
         {
           "name": "needs_review",
           "type": "boolean",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "original",
+          "type": "object",
+          "required": false,
+          "description": "Present only while an opt-in retained source image is live (instance setting originals.enabled AND the submit passed keep_original); null otherwise, including after expiry.\n"
+        },
+        {
+          "name": "original.url",
+          "type": "string",
+          "required": false,
+          "description": "/v1/originals/{sha}; in signed mode it also carries exp and sig and needs no key"
+        },
+        {
+          "name": "original.expires_at",
+          "type": "string",
+          "required": false,
+          "description": "when the original is pruned"
+        },
+        {
+          "name": "original.url_expires_at",
+          "type": "string",
+          "required": false,
+          "description": "signed mode only: when this url stops working"
+        },
+        {
+          "name": "original.bytes",
+          "type": "integer",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "original.mime",
+          "type": "string",
           "required": false,
           "description": ""
         },

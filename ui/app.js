@@ -704,7 +704,9 @@ async function loadSettings() {
       modes.map((m) => `<label class="chk"><input type="checkbox"
         class="s-allow" value="${m}"${allowed.has(m) ? " checked" : ""}> ${m}</label>`)
         .join("") + `</div>
-      <div id="s-msg"></div>`;
+      <div id="s-msg"></div>
+      <div id="s-originals"></div>`;
+    loadOriginalsSettings();
     $("s-save").onclick = async () => {
       const body = {
         mode: $("s-mode").value,
@@ -718,6 +720,63 @@ async function loadSettings() {
       try {
         await api("/profile", { method: "POST", body: JSON.stringify(body) });
         $("s-msg").innerHTML = '<div class="notice">saved.</div>';
+      } catch (err) { alert(err.message); }
+    };
+  } catch (err) {
+    el.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
+/* Original retention: the one setting that makes blurd persist SOURCE
+   images, so it says so plainly. Keys set by env render disabled. */
+async function loadOriginalsSettings() {
+  const el = $("s-originals");
+  try {
+    const o = await api("/settings/originals");
+    const lk = new Set(o.locked);
+    const dis = (k) => (lk.has(k) ? " disabled" : "");
+    const note = (k) => (lk.has(k) ? ' <span style="color:var(--dim)">(set by env)</span>' : "");
+    const days = (s) => (s / 86400).toFixed(s % 86400 ? 2 : 0);
+    el.innerHTML = `
+      <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                 color:var(--dim);margin:26px 0 8px">original retention</h3>
+      <div class="notice">
+        <b>Off by default.</b> When enabled, a request that passes
+        <code>keep_original=SECONDS</code> also stores the <b>unredacted</b>
+        source until that deadline (capped below) and gets its URL in the
+        <code>original</code> field. Expired originals are pruned by the
+        sweep. Any key that can read the redacted image can read the original.
+      </div>
+      <div class="mintbox">
+        <label class="chk"><input type="checkbox" id="o-enabled"${o.enabled ? " checked" : ""}${dis("enabled")}>
+          enabled${note("enabled")}</label>
+        <div><label>max TTL (days)${note("max_ttl")}</label>
+          <input id="o-max" type="number" min="0.01" step="any"
+                 max="${o.hard_max_ttl / 86400}" value="${days(o.max_ttl)}"${dis("max_ttl")}></div>
+        <div><label>URL mode${note("url_mode")}</label>
+          <select id="o-mode"${dis("url_mode")}>` +
+      o.url_modes.map((m) => `<option value="${m}"${m === o.url_mode ? " selected" : ""}>${m}</option>`).join("") +
+      `</select></div>
+        <div><label>signed URL lifetime (s)${note("sign_ttl")}</label>
+          <input id="o-sign" type="number" min="60" value="${o.sign_ttl}"${dis("sign_ttl")}></div>
+        <button id="o-save">Save</button>
+      </div>
+      <div id="o-msg"></div>`;
+    $("o-save").onclick = async () => {
+      const body = {};
+      if (!lk.has("enabled")) body.enabled = $("o-enabled").checked;
+      if (!lk.has("max_ttl")) body.max_ttl = Math.round(parseFloat($("o-max").value) * 86400);
+      if (!lk.has("url_mode")) body.url_mode = $("o-mode").value;
+      if (!lk.has("sign_ttl")) body.sign_ttl = parseInt($("o-sign").value, 10);
+      const headers = { "Content-Type": "application/json" };
+      if (o.step_up_required) {
+        const secret = prompt("Admin secret (required to change retention):");
+        if (!secret) return;
+        headers["X-Blurd-Admin-Secret"] = secret;
+      }
+      try {
+        await api("/settings/originals", { method: "POST", headers, body: JSON.stringify(body) });
+        $("o-msg").innerHTML = '<div class="notice">saved.</div>';
       } catch (err) { alert(err.message); }
     };
   } catch (err) {

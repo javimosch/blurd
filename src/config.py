@@ -51,6 +51,12 @@ DEFAULTS = {
     # the profile (it is not a processing parameter, it is a policy), so it
     # does NOT affect profile_hash.
     "allowed_redact_modes": list(REDACT_MODES),
+    # Opt-in retention of SOURCE images (src/originals.py). Off by default:
+    # it is the only exception to "never persist the source image", and it
+    # also needs the request to ask. The dashboard can override these at
+    # runtime (stored in the database); env beats both.
+    "originals": {"enabled": False, "max_ttl": 30 * 86400,
+                  "url_mode": "authenticated", "sign_ttl": 900},
     "fetch": {
         "timeout_s": 15,
         # Applies to every image input -- url fetch, file read and raw upload.
@@ -258,6 +264,10 @@ ENV_OVERRIDES = {
     "BLURD_ALLOWED_REDACT_MODES": (
         "allowed_redact_modes",
         lambda s: [m.strip() for m in s.split(",") if m.strip()]),
+    "BLURD_ORIGINALS_ENABLED": ("originals.enabled", str),
+    "BLURD_ORIGINALS_MAX_TTL": ("originals.max_ttl", int),
+    "BLURD_ORIGINALS_URL_MODE": ("originals.url_mode", str),
+    "BLURD_ORIGINALS_SIGN_TTL": ("originals.sign_ttl", int),
     "BLURD_S3_ENDPOINT": ("storage.s3.endpoint", str),
     "BLURD_S3_BUCKET": ("storage.s3.bucket", str),
     "BLURD_S3_REGION": ("storage.s3.region", str),

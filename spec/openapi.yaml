@@ -62,6 +62,19 @@ components:
         profile_hash: { type: string }
         cached: { type: boolean, description: "true when nothing was reprocessed" }
         needs_review: { type: boolean }
+        original:
+          type: object
+          nullable: true
+          description: >
+            Present only while an opt-in retained source image is live
+            (instance setting originals.enabled AND the submit passed
+            keep_original); null otherwise, including after expiry.
+          properties:
+            url: { type: string, description: "/v1/originals/{sha}; in signed mode it also carries exp and sig and needs no key" }
+            expires_at: { type: string, description: "when the original is pruned" }
+            url_expires_at: { type: string, description: "signed mode only: when this url stops working" }
+            bytes: { type: integer }
+            mime: { type: string }
         manual_regions:
           type: array
           description: "operator-drawn additive masks applied on top of the stored blob via the dashboard; always black, normalized 0..1 coords"
@@ -182,6 +195,7 @@ paths:
         - { in: query, name: on_conflict, schema: { type: string, enum: [reuse, replace, reject], default: reuse } }
         - { in: query, name: tags, schema: { type: string }, description: "comma separated (raw-body form)" }
         - { in: query, name: metadata, schema: { type: string }, description: "JSON object (raw-body form)" }
+        - { in: query, name: keep_original, schema: { type: integer }, description: "seconds to retain the SOURCE image (60..originals.max_ttl, default cap 30 days). Opt-in; refused with 422 unless the instance enables originals. Also accepted as a JSON body field. Not part of profile_hash." }
         - in: query
           name: profile
           schema: { type: string }
@@ -270,6 +284,22 @@ paths:
         "200": { description: "image/jpeg or image/png" }
         "404": { description: not found }
         "410": { description: "resource_expired: TTL'd blob was pruned; resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /v1/originals/{sha}:
+    get:
+      summary: Opt-in retained source image bytes
+      description: >
+        Readable by any key whose scope can read the redacted image, or with
+        no key via a signed url (exp + sig) when originals.url_mode=signed.
+        Sent with Cache-Control no-store.
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string }, description: "full 64-hex source sha" }
+        - { in: query, name: exp, schema: { type: integer }, description: "signed mode: unix expiry" }
+        - { in: query, name: sig, schema: { type: string }, description: "signed mode: HMAC-SHA256 hex" }
+      responses:
+        "200": { description: "the original bytes, as submitted" }
+        "401": { description: "missing key, or invalid/expired signature" }
+        "404": { description: "never retained, out of scope, or the image was deleted" }
+        "410": { description: "resource_expired: retention deadline passed", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/thumbs/{sha}:
     get:
       summary: Thumbnail for grid views

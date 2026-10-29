@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from . import auth, db, jobs, pipeline, store as _store
+from . import auth, db, jobs, originals, pipeline, store as _store
 from .scope import Scope
 from .config import Config
 from .errors import BlurdError, Expired, Internal, NotFound, Upstream
@@ -36,13 +36,15 @@ class LocalClient:
     # -- write ----------------------------------------------------------------
     def submit(self, *, url=None, path=None, data=None, code=None, tags=None,
                metadata=None, overrides=None, force=False, on_conflict="reuse",
-               wait: float = 0.0, scope: Scope = None) -> Dict[str, Any]:
+               wait: float = 0.0, scope: Scope = None,
+               keep_original=None) -> Dict[str, Any]:
         """Always creates a job. wait>0 blocks for up to that many seconds,
         which is what makes `blurd blur x.jpg` feel synchronous while the API
         underneath stays asynchronous."""
         job = self.queue.submit(url=url, path=path, data=data, external_id=code,
                                 tags=tags, metadata=metadata, overrides=overrides,
-                                force=force, on_conflict=on_conflict, scope=scope)
+                                force=force, on_conflict=on_conflict, scope=scope,
+                                keep_original=keep_original)
         if wait and job["status"] in ("queued", "running"):
             job = self.queue.wait(job["job_id"], wait, scope)
         return job
@@ -146,6 +148,22 @@ class LocalClient:
             raise Expired("image", sha, {"expired_at": rec["expires_at"]})
         return _store.build(self.cfg).get(rec["blob"]["key"])
 
+    def original(self, sha: str, scope: Scope = None) -> tuple:
+        """(bytes, mime) of an opt-in retained source image. Access follows
+        the redacted image: any key whose scope can read the sha. Scope is
+        checked before expiry so a 410 never confirms an out-of-scope sha."""
+        conn = db.connect(self.cfg.db_file)
+        blobs = _store.build(self.cfg)
+        row, expired = originals.lookup(self.cfg, conn, sha, blobs)
+        if row is None:
+            raise NotFound("original", sha)
+        if scope is not None and not scope.is_global \
+                and not scope.allows_sha(conn, sha):
+            raise NotFound("original", sha)
+        if expired:
+            raise Expired("original", sha, {"expired_at": row["expires_at"]})
+        return blobs.get(row["blob_path"]), row["mime"]
+
     def stats(self, scope: Scope = None) -> Dict[str, Any]:
         conn = db.connect(self.cfg.db_file)
         s = db.stats(conn, scope)
@@ -182,6 +200,9 @@ class LocalClient:
         blobs = _store.build(self.cfg)
         for rel in paths:
             blobs.delete(rel)
+        orig = db.original_find(conn, sha)
+        if orig is not None and orig["blob_path"]:
+            blobs.delete(orig["blob_path"])     # object first; the row goes below
         db.delete_image(conn, sha)
         return {"source_sha": sha, "deleted": True, "artifacts": len(paths)}
 
@@ -258,8 +279,10 @@ class RemoteClient:
 
     def submit(self, *, url=None, path=None, data=None, code=None, tags=None,
                metadata=None, overrides=None, force=False, on_conflict="reuse",
-               wait: float = 0.0):
+               wait: float = 0.0, keep_original=None):
         q = {"on_conflict": on_conflict}
+        if keep_original:
+            q["keep_original"] = str(int(keep_original))
         if force:
             q["force"] = "1"
         if wait:
@@ -335,6 +358,9 @@ class RemoteClient:
         return self._call("GET", f"/v1/blobs/{sha}",
                           query={"profile": profile} if profile else None,
                           expect_json=False)
+
+    def original(self, sha):
+        return self._call("GET", f"/v1/originals/{sha}", expect_json=False), None
 
     def stats(self):
         return self._call("GET", "/v1/stats")

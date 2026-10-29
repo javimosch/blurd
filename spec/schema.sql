@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   tenant        TEXT NOT NULL DEFAULT 'global',
   force         INTEGER NOT NULL DEFAULT 0,
   owner_id      TEXT,                      -- the instance that holds this job
+  keep_original INTEGER,                   -- seconds to retain the source; NULL = never
   created_at    TEXT NOT NULL,
   started_at    TEXT,
   finished_at   TEXT,
@@ -229,6 +230,30 @@ CREATE TABLE IF NOT EXISTS public_rules (
   meta_key    TEXT,
   meta_value  TEXT,
   created_at  TEXT NOT NULL
+);
+
+-- Opt-in original retention (added in 0.21.0). The ONE place a source image
+-- may be persisted: only when the instance enables it AND the request asks,
+-- and always with a deadline. One row per sha -- any key that can read the
+-- redacted image may read the original, so there is no tenant here. No FK to
+-- images: the original is written right after decode, before the image row.
+CREATE TABLE IF NOT EXISTS originals (
+  source_sha  TEXT PRIMARY KEY,
+  blob_path   TEXT NOT NULL,
+  mime        TEXT NOT NULL,
+  bytes       INTEGER NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_originals_expires ON originals(expires_at);
+
+-- Runtime settings edited from the dashboard (added in 0.21.0). In the
+-- database rather than config.json so every replica sees a change at once
+-- and none needs a restart; env still wins over a row here.
+CREATE TABLE IF NOT EXISTS settings (
+  key         TEXT PRIMARY KEY,
+  value_json  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
 );
 
 -- ---------------------------------------------------------------------------

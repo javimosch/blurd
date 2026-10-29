@@ -57,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--plate-score", type=float)
     b.add_argument("--ttl", type=int, metavar="SECONDS",
                    help="Prune the redacted blob after N seconds (min 60)")
+    b.add_argument("--keep-original", type=int, metavar="SECONDS",
+                   help="Also keep the SOURCE image for N seconds and return "
+                        "its url (needs originals.enabled on the instance)")
     b.add_argument("--force", action="store_true")
     b.add_argument("--out", help="Also write the redacted image here")
 
@@ -79,6 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("download")
     d.add_argument("sha", nargs="?"); d.add_argument("--code")
     d.add_argument("--out", required=True); d.add_argument("--profile")
+
+    og = sub.add_parser("originals", help="Opt-in retained source images")
+    ogs = og.add_subparsers(dest="originals_cmd")
+    od = ogs.add_parser("download", help="Fetch a retained original")
+    od.add_argument("sha"); od.add_argument("--out", required=True)
+    ost = ogs.add_parser("settings", help="Show or change retention settings "
+                                          "(local; env-set keys are locked)")
+    ost.add_argument("--enable", dest="enabled", action="store_const", const=True)
+    ost.add_argument("--disable", dest="enabled", action="store_const", const=False)
+    ost.add_argument("--max-ttl", type=int, metavar="SECONDS")
+    ost.add_argument("--url-mode", choices=["authenticated", "signed"])
+    ost.add_argument("--sign-ttl", type=int, metavar="SECONDS")
 
     jb = sub.add_parser("jobs", help="Inspect async jobs")
     js = jb.add_subparsers(dest="jobs_cmd")
@@ -294,6 +309,23 @@ def run(args, out: Out) -> int:
                       "revocation": "always available in the dashboard"})
         return EXIT_SUCCESS
 
+    if cmd == "originals" and getattr(args, "originals_cmd", None) == "settings":
+        from . import db as _db, originals as _orig
+        cfg.ensure_dirs()
+        _db.init(cfg.db_file)
+        conn = _db.connect(cfg.db_file)
+        change = {k: v for k, v in {
+            "enabled": args.enabled, "max_ttl": args.max_ttl,
+            "url_mode": args.url_mode, "sign_ttl": args.sign_ttl}.items()
+            if v is not None}
+        if change:
+            res = _orig.update(cfg, conn, change)
+            _db.audit(conn, "cli", "settings.originals", "originals", None, change)
+        else:
+            res = _orig.settings(cfg, conn)
+        out.emit(res)
+        return EXIT_SUCCESS
+
     if cmd == "storage":
         from . import store as _store
         blobs = _store.build(cfg)
@@ -461,7 +493,8 @@ def run(args, out: Out) -> int:
                         tags=args.tag, metadata=_kv(args.meta),
                         overrides=_overrides(args), force=args.force,
                         on_conflict=args.on_conflict,
-                        wait=0.0 if args.async_ else args.wait)
+                        wait=0.0 if args.async_ else args.wait,
+                        keep_original=args.keep_original)
         if args.out and job.get("result"):
             blob = cl.blob(job["source_sha"], job["profile_hash"])
             Path(args.out).write_bytes(blob)
@@ -512,6 +545,16 @@ def run(args, out: Out) -> int:
         Path(args.out).write_bytes(blob)
         out.emit({"source_sha": sha, "external_id": args.code,
                   "written_to": str(Path(args.out).resolve()), "bytes": len(blob)})
+        return EXIT_SUCCESS
+
+    if cmd == "originals":
+        if getattr(args, "originals_cmd", None) != "download":
+            raise InvalidArgument("Use: blurd originals download <sha> --out FILE "
+                                  "| blurd originals settings")
+        data, _ = cl.original(args.sha)
+        Path(args.out).write_bytes(data)
+        out.emit({"source_sha": args.sha, "bytes": len(data),
+                  "written_to": str(Path(args.out).resolve())})
         return EXIT_SUCCESS
 
     if cmd == "delete":

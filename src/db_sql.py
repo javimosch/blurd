@@ -79,6 +79,8 @@ def migrate(conn) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN force INTEGER NOT NULL DEFAULT 0")
     if "jobs" in tables and "owner_id" not in _columns(conn, "jobs"):
         conn.execute("ALTER TABLE jobs ADD COLUMN owner_id TEXT")
+    if "jobs" in tables and "keep_original" not in _columns(conn, "jobs"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN keep_original INTEGER")
     if "artifacts" in tables and "expires_at" not in _columns(conn, "artifacts"):
         conn.execute("ALTER TABLE artifacts ADD COLUMN expires_at TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_expires "
@@ -666,6 +668,8 @@ def find_image(conn, sha: str):
 
 def delete_image(conn, sha: str) -> None:
     conn.execute("DELETE FROM images WHERE source_sha=?", (sha,))   # cascades
+    # No FK on originals (written before the image row), so not cascaded.
+    conn.execute("DELETE FROM originals WHERE source_sha=?", (sha,))
     conn.commit()
 
 
@@ -811,11 +815,12 @@ def insert_job(conn, row: dict) -> None:
         """INSERT INTO jobs (id, status, external_id, on_conflict, source_kind,
              source_ref, source_sha, profile_hash, profile_json, tags_json,
              metadata_json, artifact_id, cached, tenant, force, owner_id,
-             created_at, started_at, finished_at, duration_ms)
+             keep_original, created_at, started_at, finished_at, duration_ms)
            VALUES (:id,:status,:external_id,:on_conflict,:source_kind,:source_ref,
                    :source_sha,:profile_hash,:profile_json,:tags_json,
                    :metadata_json,:artifact_id,:cached,:tenant,:force,:owner_id,
-                   :created_at,:started_at,:finished_at,:duration_ms)""", row)
+                   :keep_original,:created_at,:started_at,:finished_at,
+                   :duration_ms)""", dict(row, keep_original=row.get("keep_original")))
     conn.commit()
 
 
@@ -1172,3 +1177,58 @@ def _stats_uncached(conn, scope=None) -> Dict[str, Any]:
             "SELECT tag, COUNT(*) n FROM tags WHERE tenant=? GROUP BY tag "
             "ORDER BY n DESC LIMIT 50", (tenant,))],
     }
+
+
+# --- retained originals (opt-in) ---------------------------------------------
+
+def original_find(conn, sha: str):
+    return conn.execute(
+        "SELECT source_sha, blob_path, mime, bytes, created_at, expires_at "
+        "FROM originals WHERE source_sha=?", (sha,)).fetchone()
+
+
+def original_upsert(conn, sha: str, blob_path: str, mime: str, size: int,
+                    expires_at: str) -> None:
+    """A second retention request may only EXTEND the deadline: one caller
+    asking for an hour must not cut short another's thirty days."""
+    conn.execute(
+        """INSERT INTO originals (source_sha, blob_path, mime, bytes,
+                                  created_at, expires_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT (source_sha) DO UPDATE SET
+             blob_path = excluded.blob_path, mime = excluded.mime,
+             bytes = excluded.bytes,
+             expires_at = CASE WHEN excluded.expires_at > originals.expires_at
+                               THEN excluded.expires_at
+                               ELSE originals.expires_at END""",
+        (sha, blob_path, mime, size, now(), expires_at))
+    conn.commit()
+
+
+def original_expire(conn, sha: str) -> None:
+    """Bytes pruned; the row stays as a tombstone so reads can answer 410."""
+    conn.execute("UPDATE originals SET blob_path='' WHERE source_sha=?", (sha,))
+    conn.commit()
+
+
+def expired_originals(conn, limit: int = 200) -> List[dict]:
+    return conn.execute(
+        "SELECT source_sha, blob_path, expires_at FROM originals "
+        "WHERE expires_at < ? AND blob_path != '' LIMIT ?",
+        (now(), limit)).fetchall()
+
+
+# --- runtime settings ---------------------------------------------------------
+
+def settings_all(conn) -> Dict[str, Any]:
+    return {r["key"]: json.loads(r["value_json"])
+            for r in conn.execute("SELECT key, value_json FROM settings")}
+
+
+def setting_put(conn, key: str, value: Any) -> None:
+    conn.execute(
+        """INSERT INTO settings (key, value_json, updated_at) VALUES (?,?,?)
+           ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
+             updated_at = excluded.updated_at""",
+        (key, json.dumps(value), now()))
+    conn.commit()

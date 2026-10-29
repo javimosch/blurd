@@ -18,7 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, auth, db, jobs as jobs_mod, pipeline, plugins, scope as scope_mod
+from . import (__version__, auth, db, jobs as jobs_mod, originals, pipeline,
+               plugins, scope as scope_mod)
 from .client import LocalClient
 from .config import Config, REDACT_MODES
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
@@ -34,6 +35,7 @@ _ROUTES = [
     ("DELETE", re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})$")),
     ("GET",    re.compile(r"^/v1/blobs/(?P<sha>[0-9a-f]{6,64})$")),
     ("GET",    re.compile(r"^/v1/thumbs/(?P<sha>[0-9a-f]{6,64})$")),
+    ("GET",    re.compile(r"^/v1/originals/(?P<sha>[0-9a-f]{64})$")),
     ("GET",    re.compile(r"^/v1/stats/?$")),
     ("GET",    re.compile(r"^/v1/health/?$")),
     ("POST",   re.compile(r"^/v1/feedback/?$")),
@@ -305,10 +307,23 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 return self._feedback_list(conn)
 
+        q = self._query()
+        m_orig = re.match(r"^/v1/originals/(?P<sha>[0-9a-f]{64})$", path)
+        if m_orig and method == "GET" and self._one(q, "sig") is not None:
+            # A signed URL is a capability minted for a caller that already
+            # passed the scope check, so it stands in for the key.
+            if not originals.verify(conn, m_orig.group("sha"),
+                                    self._one(q, "exp"), self._one(q, "sig")):
+                raise AuthFailed("Invalid or expired signed URL",
+                                 {"hint": "fetch the image record again for a fresh url"})
+            return self._serve_original(client, m_orig.group("sha"), None)
+
         # Everything else is machine-to-machine and needs a key.
         principal = auth.require_api_key(conn, self.headers)
         scope = principal["scope"]
-        q = self._query()
+
+        if m_orig and method == "GET":
+            return self._serve_original(client, m_orig.group("sha"), scope)
 
         if path.rstrip("/") == "/v1/stats":
             return self._send(200, {"ok": True, "data": client.stats(scope)})
@@ -363,6 +378,16 @@ class Handler(BaseHTTPRequestHandler):
 
         raise NotFound("endpoint", f"{method} {path}")
 
+    def _serve_original(self, client, sha, scope):
+        data, mime = client.original(sha, scope)
+        # no-store: the original has a deadline, and a cache honouring the
+        # blob's day-long max-age would keep serving it past that.
+        return self._send_cached(data, mime, sha[:32] + "-o", {
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{sha[:16]}-original"',
+            "X-Blurd-Source-Sha": sha,
+        })
+
     def _submit(self, client, q, scope=None):
         """Always returns a job. ?wait=N blocks for up to N seconds so a caller
         that wants the answer inline can have it without the API pretending to
@@ -388,7 +413,9 @@ class Handler(BaseHTTPRequestHandler):
                 tags=payload.get("tags"), metadata=payload.get("metadata"),
                 overrides=payload.get("profile"), force=force,
                 on_conflict=payload.get("on_conflict", on_conflict), wait=wait,
-                scope=scope)
+                scope=scope,
+                keep_original=payload.get("keep_original",
+                                          self._one(q, "keep_original")))
         else:
             if not raw:
                 raise ValidationError("Empty request body")
@@ -398,7 +425,8 @@ class Handler(BaseHTTPRequestHandler):
             job = client.submit(
                 data=raw, code=self._one(q, "code") or self._one(q, "external_id"),
                 tags=tags, metadata=meta, overrides=prof, force=force,
-                on_conflict=on_conflict, wait=wait, scope=scope)
+                on_conflict=on_conflict, wait=wait, scope=scope,
+                keep_original=self._one(q, "keep_original"))
 
         status = 200 if job["status"] in ("done", "failed") else 202
         extra = {"Location": f"/v1/jobs/{job['job_id']}"}
@@ -617,6 +645,29 @@ class Handler(BaseHTTPRequestHandler):
                      m.group("rid"), self.address_string())
             conn.commit()
             return self._send(200, {"ok": True, "data": {"deleted": True}})
+        if sub.rstrip("/") == "/settings/originals":
+            if self.command == "POST":
+                # Turning this on persists source images, so when the second
+                # secret is configured it gates this exactly like key creation.
+                secret = cfg.get("dashboard_key_secret")
+                if secret and not auth.check_step_up(self.headers, secret):
+                    raise AuthFailed(
+                        "The admin secret is required to change original retention",
+                        {"header": "X-Blurd-Admin-Secret"})
+                try:
+                    payload = json.loads(self._body() or b"{}")
+                except ValueError:
+                    raise ValidationError("Request body is not valid JSON")
+                data = originals.update(cfg, conn, payload)
+                db.audit(conn, "dashboard", "settings.originals", "originals",
+                         self.address_string(), payload)
+                conn.commit()
+            else:
+                data = originals.settings(cfg, conn)
+            return self._send(200, {"ok": True, "data": dict(
+                data, step_up_required=bool(cfg.get("dashboard_key_secret")),
+                url_modes=list(originals.URL_MODES),
+                hard_max_ttl=originals.HARD_MAX_TTL)})
         if sub.rstrip("/") == "/profile":
             if self.command == "POST":
                 payload = json.loads(self._body() or b"{}")

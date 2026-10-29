@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from . import db, pipeline, resources, store
+from . import db, originals, pipeline, resources, store
 from .scope import Scope
 from .canonical import canonical_json
 from .config import Config
@@ -100,6 +100,7 @@ class JobQueue:
             try:
                 self.reap()
                 self.prune_expired()
+                self.prune_originals()
                 self.prune_audit()
                 cb = getattr(self, "on_sweep", None)
                 if cb:
@@ -153,6 +154,13 @@ class JobQueue:
         # closing it poisons every later query on this thread.
         return len(rows)
 
+    def prune_originals(self) -> int:
+        """Delete retained source images past their deadline. Unlike the
+        `originals.enabled` gate, this always runs: turning retention off
+        must not leave already-kept originals alive past their TTL."""
+        conn = db.connect(self.cfg.db_file)
+        return originals.prune(self.cfg, conn)
+
     def prune_audit(self, days: int = 30) -> int:
         """Retention for the audit/event log so a long-lived instance does not
         grow its home on traffic alone. 30 days by default."""
@@ -201,7 +209,8 @@ class JobQueue:
     # -- submission -----------------------------------------------------------
     def submit(self, *, url=None, path=None, data=None, external_id=None,
                tags=None, metadata=None, overrides=None, force=False,
-               on_conflict="reuse", scope: Scope = None) -> dict:
+               on_conflict="reuse", scope: Scope = None,
+               keep_original=None) -> dict:
         if self._draining.is_set():
             # Also 503: a draining replica is refusing work it could otherwise
             # do, which is what a balancer needs to hear to route elsewhere.
@@ -219,12 +228,18 @@ class JobQueue:
         tenant = scope.tenant
         profile = self.cfg.resolve_profile(overrides)
         phash = Config.hash_of(profile)
+        keep = originals.requested_ttl(self.cfg, conn, keep_original)
 
         # Fast path: a known external_id under the default policy short-circuits
         # before any fetch or decode. For a re-ingesting producer this is the
         # difference between a 1 ms index hit and re-downloading the original.
         if external_id and not force and on_conflict == "reuse":
             existing = resolve_code(conn, external_id, phash, tenant)
+            # A retention request needs the bytes, which this path never
+            # touches -- unless the original is already being kept.
+            if existing is not None and keep and \
+                    originals.info(self.cfg, conn, existing) is None:
+                existing = None
             if existing is not None:
                 return self._instant_done(conn, existing, external_id, phash,
                                           profile, tags, metadata, on_conflict,
@@ -267,7 +282,7 @@ class JobQueue:
             "tags_json": json.dumps(tags or []),
             "metadata_json": json.dumps(metadata or {}), "artifact_id": None,
             "cached": 0, "tenant": tenant, "force": 1 if force else 0,
-            "owner_id": self.instance_id,
+            "owner_id": self.instance_id, "keep_original": keep,
             "created_at": db.now(), "started_at": None, "finished_at": None,
             "duration_ms": None})
 
@@ -402,6 +417,7 @@ class JobQueue:
 
         with self._lock:
             payload = self._payloads.get(job_id)
+        keep = row["keep_original"] if "keep_original" in row.keys() else None
         try:
             if row["source_kind"] == "url":
                 res = pipeline.process(
@@ -410,7 +426,7 @@ class JobQueue:
                     metadata=json.loads(row["metadata_json"]),
                     overrides=json.loads(row["profile_json"]),
                     tenant=row["tenant"] or "global",
-                    force=bool(row["force"]))
+                    force=bool(row["force"]), keep_original=keep)
             else:
                 if payload is None:
                     raise Upstream(
@@ -422,7 +438,7 @@ class JobQueue:
                     metadata=json.loads(row["metadata_json"]),
                     overrides=json.loads(row["profile_json"]),
                     tenant=row["tenant"] or "global",
-                    force=bool(row["force"]))
+                    force=bool(row["force"]), keep_original=keep)
 
             sha = res["source_sha"]
             if row["external_id"]:

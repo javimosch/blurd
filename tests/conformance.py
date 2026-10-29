@@ -829,6 +829,108 @@ def main():
               len(json.loads(b).get("error", {}).get("details", {})
                   .get("tenants", [])) >= 2)
 
+    # Last on purpose: it deletes an image, and earlier checks pick "the
+    # newest job" and expect its result to still exist.
+    print("\n-- originals: opt-in source retention with a TTL")
+    # Toggled through the CLI: settings live in the shared database, so the
+    # running daemon sees a change on its next request with no restart.
+    def osettings(*args):
+        return j(cli(a.bin, "originals", "settings", *args)).get("data", {})
+
+    def submit_keep(body, keep=None, key=None):
+        qs = f"&keep_original={keep}" if keep else ""
+        s, b, _ = http(f"{a.url}/v1/images?wait=60{qs}", "POST",
+                       key or a.api_key, body, "image/jpeg")
+        return s, json.loads(b or b"{}")
+
+    before = osettings()
+    if "enabled" in before.get("locked", []) or "url_mode" in before.get("locked", []):
+        print("  SKIP  originals: enabled/url_mode pinned by env on this target")
+    else:
+        osettings("--disable")
+        s, body = submit_keep(_mark_bytes(raw, f"orig-off-{time.time_ns()}"), 3600)
+        check("keep_original is refused while retention is disabled",
+              s == 422 and body.get("error", {}).get("type") == "validation_error",
+              f"got {s}")
+        osettings("--enable", "--url-mode", "authenticated")
+        lim = osettings().get("max_ttl", 0)
+        s, body = submit_keep(_mark_bytes(raw, f"orig-big-{time.time_ns()}"), lim + 1)
+        check("keep_original above max_ttl is refused", s == 422, f"got {s}")
+
+        plain = _mark_bytes(raw, f"orig-none-{time.time_ns()}")
+        s, body = submit_keep(plain)
+        res = (body.get("data") or {}).get("result") or {}
+        check("without keep_original the record carries original: null",
+              s == 200 and "original" in res and res["original"] is None,
+              f"got {s}/{res.get('original')}")
+        psha = hashlib.sha256(plain).hexdigest()
+        s, _, _ = http(f"{a.url}/v1/originals/{psha}", key=a.api_key)
+        check("an original that was never kept is 404", s == 404, f"got {s}")
+
+        kept = _mark_bytes(raw, f"orig-keep-{time.time_ns()}")
+        ksha = hashlib.sha256(kept).hexdigest()
+        s, body = submit_keep(kept, 61)
+        orig = ((body.get("data") or {}).get("result") or {}).get("original") or {}
+        check("keep_original returns original.url and expires_at",
+              s == 200 and orig.get("url") == f"/v1/originals/{ksha}"
+              and bool(orig.get("expires_at")), f"got {s}/{orig}")
+        s, b, h = http(f"{a.url}/v1/originals/{ksha}", key=a.api_key)
+        check("the original is served byte-identical", s == 200 and b == kept,
+              f"got {s}, {len(b or b'')} bytes")
+        check("the original is not cacheable past its deadline",
+              "no-store" in (h.get("Cache-Control") or ""), h.get("Cache-Control"))
+        s, _, _ = http(f"{a.url}/v1/originals/{ksha}")
+        check("the authenticated original needs a key", s == 401, f"got {s}")
+        if a.scoped_key_b:
+            s, _, _ = http(f"{a.url}/v1/originals/{ksha}", key=a.scoped_key_b)
+            check("an out-of-scope key gets 404 for the original", s == 404,
+                  f"got {s}")
+        s, body = submit_keep(kept, 60)
+        o2 = ((body.get("data") or {}).get("result") or {}).get("original") or {}
+        check("a shorter second request never cuts the deadline",
+              o2.get("expires_at") == orig.get("expires_at"),
+              f"{o2.get('expires_at')} vs {orig.get('expires_at')}")
+
+        osettings("--url-mode", "signed")
+        s, b, _ = http(f"{a.url}/v1/images/{ksha}", key=a.api_key)
+        surl = ((json.loads(b).get("data") or {}).get("original") or {}).get("url", "")
+        check("signed mode returns a url carrying exp and sig",
+              "exp=" in surl and "sig=" in surl, surl)
+        s, b, _ = http(f"{a.url}{surl}")
+        check("a signed url serves the original without a key",
+              s == 200 and b == kept, f"got {s}")
+        s, _, _ = http(f"{a.url}{surl[:-1]}{'0' if surl[-1:] != '0' else '1'}")
+        check("a tampered signature is refused", s == 401, f"got {s}")
+        osettings("--url-mode", "authenticated")
+
+        exp_ts = datetime.strptime(orig["expires_at"], "%Y-%m-%dT%H:%M:%SZ"
+                                   ).replace(tzinfo=timezone.utc).timestamp()
+        deadline = exp_ts + 30
+        while True:
+            s, b, _ = http(f"{a.url}/v1/originals/{ksha}", key=a.api_key)
+            if s != 200 or time.time() > deadline:
+                break
+            time.sleep(2)
+        err = json.loads(b).get("error", {}) if s != 200 else {}
+        check("the original is 410 resource_expired after its TTL",
+              s == 410 and err.get("type") == "resource_expired", f"got {s}")
+        s, b, _ = http(f"{a.url}/v1/images/{ksha}", key=a.api_key)
+        check("an expired original drops out of the record",
+              s == 200 and (json.loads(b).get("data") or {}).get("original") is None)
+
+        gone = _mark_bytes(raw, f"orig-del-{time.time_ns()}")
+        gsha = hashlib.sha256(gone).hexdigest()
+        submit_keep(gone, 3600)
+        http(f"{a.url}/v1/images/{gsha}", "DELETE", a.api_key)
+        s, _, _ = http(f"{a.url}/v1/originals/{gsha}", key=a.api_key)
+        check("deleting the image deletes its original", s == 404, f"got {s}")
+
+        # Leave the target as found.
+        restore = ["--enable" if before.get("enabled") else "--disable"]
+        if before.get("url_mode"):
+            restore += ["--url-mode", before["url_mode"]]
+        osettings(*restore)
+
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

@@ -112,6 +112,7 @@ def init(conn) -> None:
 
     db["instances"].create_index([("last_seen", pymongo.DESCENDING)])
     db["audit"].create_index([("seq", pymongo.DESCENDING)])
+    db["originals"].create_index([("expires_at", pymongo.ASCENDING)])
 
 
 def migrate(conn) -> None:
@@ -346,6 +347,7 @@ def delete_image(conn, sha: str) -> None:
     db["thumbs"].delete_many({"_id": {"$in": ids}})
     db["labels"].delete_many({"source_sha": sha})
     db["codes"].delete_many({"source_sha": sha})
+    db["originals"].delete_one({"_id": sha})
     db["images"].delete_one({"_id": sha})
 
 
@@ -826,6 +828,7 @@ def insert_job(conn, row: dict) -> None:
     doc["_id"] = doc.pop("id")
     doc.setdefault("attempts", 0)
     doc.setdefault("error_json", None)
+    doc.setdefault("keep_original", None)
     conn.db["jobs"].insert_one(_with_sort_key(doc))
 
 
@@ -1130,3 +1133,42 @@ def _top_tags(conn, tenant: Optional[str]) -> List[dict]:
                  {"$limit": 50}]
     return [{"tag": d["_id"], "n": d["n"]}
             for d in conn.db["labels"].aggregate(pipeline)]
+
+
+# --- retained originals (opt-in) ---------------------------------------------
+
+def original_find(conn, sha: str):
+    return _row(conn.db["originals"].find_one({"_id": sha}), "source_sha")
+
+
+def original_upsert(conn, sha: str, blob_path: str, mime: str, size: int,
+                    expires_at: str) -> None:
+    """See db_sql.original_upsert: the deadline only ever moves later."""
+    conn.db["originals"].update_one(
+        {"_id": sha},
+        {"$set": {"blob_path": blob_path, "mime": mime, "bytes": size},
+         "$setOnInsert": {"created_at": now()},
+         "$max": {"expires_at": expires_at}},
+        upsert=True)
+
+
+def original_expire(conn, sha: str) -> None:
+    conn.db["originals"].update_one({"_id": sha}, {"$set": {"blob_path": ""}})
+
+
+def expired_originals(conn, limit: int = 200) -> List[dict]:
+    return [_row(d, "source_sha") for d in conn.db["originals"].find(
+        {"expires_at": {"$lt": now()}, "blob_path": {"$ne": ""}},
+        {"blob_path": 1, "expires_at": 1}).limit(limit)]
+
+
+# --- runtime settings ---------------------------------------------------------
+
+def settings_all(conn) -> Dict[str, Any]:
+    return {d["_id"]: d["value"] for d in conn.db["settings"].find({})}
+
+
+def setting_put(conn, key: str, value: Any) -> None:
+    conn.db["settings"].update_one(
+        {"_id": key}, {"$set": {"value": value, "updated_at": now()}},
+        upsert=True)

@@ -51,8 +51,15 @@ COMMANDS
       --ttl SECONDS           Keep the redacted blob only N seconds (60..2592000);
                               the record survives, the bytes are pruned on expiry
                               and a resubmit regenerates them. --ttl 86400 = 24 h.
+      --keep-original SECONDS Also keep the SOURCE image for N seconds and
+                              return its url as `original` (opt-in; needs
+                              originals.enabled on the instance).
       --force                 Reprocess even if a cached artifact exists.
       --out FILE              Also write the redacted image to FILE.
+  originals download <sha> --out FILE   Fetch a retained original.
+  originals settings [--enable|--disable] [--max-ttl S] [--url-mode M]
+                     [--sign-ttl S]     Show/change retention (env-set keys
+                                        are locked).
   jobs list [--status S] [--code C]   Recent jobs and queue depth.
   jobs get <job_id> [--wait S]        One job; --wait long-polls.
   list                        Filter stored artifacts.
@@ -137,6 +144,17 @@ PROFILES & TTL
   storage.ttl semantics: the record stores expires_at; once past, blob reads
   answer 410 resource_expired and a sweep prunes the bytes. Metadata, sha,
   detections and tags all survive -- a resubmit regenerates the blob.
+
+ORIGINALS (opt-in source retention)
+  Off by default: blurd never keeps the source image unless BOTH the instance
+  enables it (originals.enabled, via BLURD_ORIGINALS_ENABLED or the dashboard
+  settings tab) AND the request passes keep_original=SECONDS (60..max_ttl,
+  default cap 30 days). The record then carries
+  original: {{url, expires_at}}; GET /v1/originals/<sha> serves it to any key
+  that can read the redacted image. originals.url_mode=signed returns a
+  short-lived url (exp + sig) that needs no key. Past the deadline reads answer
+  410 and the sweep deletes the bytes. A second request only ever extends the
+  deadline. keep_original is not part of profile_hash.
 
 OUTPUT CONTRACT
   JSON on stdout by default: {{"version":"1.0","data":...,"timestamp":...}}
@@ -309,6 +327,7 @@ def as_json() -> dict:
             "get": "Full record, by source sha or --code",
             "download": "Fetch redacted image bytes, by sha or --code",
             "delete": "Remove an image and its artifacts",
+            "originals": "download | settings for opt-in retained source images",
             "stats": "Aggregate counters",
             "serve": "Run API + dashboard (optionally as a daemon)",
             "daemon": "start | stop | status the daemon (cli-daemon-spec)",

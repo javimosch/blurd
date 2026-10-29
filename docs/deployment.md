@@ -354,6 +354,8 @@ environment variable:
 | `BLURD_QUEUE_MAX` / `BLURD_QUEUE_MAX_BYTES` | queue bounds; bytes is the one that matters |
 | `BLURD_FETCH_MAX_BYTES` | input-size guard on every input path; default 5 MB |
 | `BLURD_STORAGE_MAX_BYTES` | cap on live redacted blobs; 0 = unlimited. Over it: expired TTL blobs are reclaimed, then writes fail `507 storage_full` |
+| `BLURD_ORIGINALS_ENABLED` / `_MAX_TTL` / `_URL_MODE` / `_SIGN_TTL` | opt-in source retention (default off, 30 d cap, `authenticated`, 900 s); set = locked in the dashboard. See `spec/originals.md` |
+| `BLURD_ORIGINALS_SIGN_SECRET` | HMAC secret for `signed` url mode; auto-generated and shared via the database if unset |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |
 | `BLURD_DASHBOARD_USER` / `BLURD_DASHBOARD_PASSWORD` | the human dashboard only — never `/v1` |
 | `BLURD_PULL_MODELS` | fetch detector models at start |

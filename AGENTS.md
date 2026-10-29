@@ -49,6 +49,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Dashboard auth, CSRF, key gating | `src/auth.py`, `spec/dashboard-auth.md` |
 | Scopes and tenancy | `src/scope.py`, `spec/scoped-keys.md` |
 | Blob backends (local / S3) | `src/store.py`, `spec/storage.md` |
+| Opt-in original retention + runtime settings | `src/originals.py`, `spec/originals.md` |
 | Metadata dispatch (the facade, no queries) | `src/db.py` |
 | Metadata backends: SQL | `src/db_sql.py`, `src/dialect.py`, `spec/postgres.md` |
 | Metadata backends: documents | `src/db_mongo.py`, `spec/mongo.md` |
@@ -68,9 +69,13 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Stand-in producer + consumer apps | `sidecar/` (Go) |
 
 ## Rules that matter
-1. **Never persist the source image.** Only `sha256(source)`, dimensions, and
-   the redacted output. `pipeline.process` drops the source bytes right after
-   decoding; keep it that way.
+1. **Never persist the source image — unless opted in twice and bounded by a
+   TTL.** By default only `sha256(source)`, dimensions, and the redacted
+   output. The single exception is `src/originals.py`: it needs BOTH the
+   instance setting `originals.enabled` (default off) AND the request's
+   `keep_original=SECONDS`, and always carries a deadline the sweep enforces.
+   No other path may write source bytes; `pipeline.process` still drops them
+   right after decoding. See `spec/originals.md`.
 2. **The cache key is `(source_sha, profile_hash)`**, never the sha alone.
    Changing a model or a threshold must produce a new artifact.
 3. **Changing `DEFAULT_PROFILE` invalidates every cached artifact**, because it

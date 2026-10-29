@@ -46,6 +46,12 @@ def rel_path(sha: str, profile_hash: str, ext: str) -> str:
     return f"{sha[:2]}/{sha[2:4]}/{sha}-{profile_hash}{ext}"
 
 
+def original_rel(sha: str) -> str:
+    """Key for an opt-in retained source image. Its own prefix, so an S3
+    lifecycle rule on `originals/` can backstop the TTL sweep."""
+    return f"originals/{sha[:2]}/{sha[2:4]}/{sha}"
+
+
 # --- backends ----------------------------------------------------------------
 
 class LocalStore:
