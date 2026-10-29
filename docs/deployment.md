@@ -358,6 +358,7 @@ environment variable:
 | `BLURD_ORIGINALS_SIGN_SECRET` | HMAC secret for `signed` url mode; auto-generated and shared via the database if unset |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |
 | `BLURD_DASHBOARD_USER` / `BLURD_DASHBOARD_PASSWORD` | the human dashboard only — never `/v1` |
+| `BLURD_DASHBOARD_ALLOW_KEY_CREATION` | `true` lets the dashboard mint API keys; each mint still needs `BLURD_DASHBOARD_KEY_SECRET` |
 | `BLURD_PULL_MODELS` | fetch detector models at start |
 | `BLURD_HOST` / `BLURD_PORT` | what to listen on |
 | `BLURD_ORT_ARENA` | leave off; on costs ~40 MB/worker for no gain |

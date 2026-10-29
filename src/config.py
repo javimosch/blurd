@@ -254,6 +254,11 @@ ENV_OVERRIDES = {
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),
     "BLURD_DASHBOARD_PASSWORD": ("dashboard_password", str),
     "BLURD_DASHBOARD_KEY_SECRET": ("dashboard_key_secret", str),
+    # Still needs BLURD_DASHBOARD_KEY_SECRET: creation demands the second
+    # secret whatever enables it (rule 10).
+    "BLURD_DASHBOARD_ALLOW_KEY_CREATION": (
+        "dashboard_allow_key_creation",
+        lambda s: s.strip().lower() in ("1", "true", "yes", "on")),
     "BLURD_DB_BACKEND": ("db.backend", str),
     "BLURD_DB_DSN": ("db.dsn", str),
     "BLURD_DB_DATABASE": ("db.database", str),
