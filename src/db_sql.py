@@ -706,6 +706,15 @@ def live_blob_bytes(conn) -> int:
     return int(row["b"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
 
 
+def live_original_bytes(conn) -> int:
+    """Bytes held by retained originals not yet pruned (tombstones have
+    blob_path '')."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(bytes),0) AS b FROM originals "
+        "WHERE blob_path != ''").fetchone()
+    return int(row["b"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
 def expire_artifact(conn, artifact_id: int) -> None:
     """TTL passed: drop the blob reference; keep the record AND the thumbnail
     -- the dashboard renders an expired card, not a hole, and a thumb is a

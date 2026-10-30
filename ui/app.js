@@ -235,8 +235,24 @@ async function loadStats() {
       ["faces", s.faces], ["plates", s.plates],
       ["needs review", s.needs_review],
       ["stored", (s.bytes_stored / 1048576).toFixed(1) + " MB"],
-    ].map(([k, v]) => `<div>${k} <b>${v}</b></div>`).join("");
+    ].map(([k, v]) => `<div>${k} <b>${v}</b></div>`).join("") + diskCounter(s);
   } catch (_) { /* header counters are cosmetic */ }
+}
+
+// Disk of the home volume, with the opt-in guard threshold if one is set.
+// Over the guard, submits answer 507 storage_full -- show it before callers do.
+function diskCounter(s) {
+  const d = s.disk;
+  if (!d) return "";
+  const gb = (b) => (b / 1073741824).toFixed(1);
+  const over = d.max_pct && d.used_pct >= d.max_pct;
+  const near = d.max_pct && d.used_pct >= d.max_pct - 5;
+  const guard = d.max_pct ? ` / guard ${d.max_pct}%` : "";
+  const title = `${d.path}: ${gb(d.used_bytes)} of ${gb(d.total_bytes)} GB used` +
+    (d.max_pct ? `; new work refused at ${d.max_pct}%` : "; no disk guard set");
+  return `<div class="disk${over ? " over" : near ? " near" : ""}" title="${esc(title)}">` +
+    `disk <b>${d.used_pct}%</b>${guard} · ${gb(d.free_bytes)} GB free` +
+    (over ? " · <b>REFUSING WORK</b>" : "") + `</div>`;
 }
 
 async function openDetail(sha, profile) {

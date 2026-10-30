@@ -161,6 +161,11 @@ def main():
     check("stats with a bad key is 401", s == 401, f"got {s}")
     s, b, _ = http(f"{a.url}/v1/stats", key=a.api_key)
     check("stats with a valid key is 200", s == 200, f"got {s}")
+    st = json.loads(b).get("data", {}) if s == 200 else {}
+    if "storage_max_bytes" in st:       # the unrestricted (operator) view
+        d = st.get("disk") or {}
+        check("operator stats report disk usage",
+              {"used_pct", "free_bytes", "max_pct"} <= set(d), str(d))
 
     print("\n-- api submit is asynchronous")
     raw = open(a.image, "rb").read()
@@ -789,6 +794,8 @@ def main():
         st = json.loads(b)["data"]
         check("stats are scoped, not instance-wide",
               st.get("scope") == "tag:conformance-a", str(st.get("scope")))
+        check("scoped stats never reveal disk usage", "disk" not in st,
+              str(st.get("disk")))
 
         # Labels on deduplicated bytes must not cross tenants.
         s, b, _ = http(f"{a.url}/v1/images?code={enc}-dup&tags=private-a"

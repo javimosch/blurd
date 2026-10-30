@@ -353,7 +353,9 @@ environment variable:
 | `BLURD_WORKERS` / `BLURD_HTTP_THREADS` | `auto` unless you mean otherwise |
 | `BLURD_QUEUE_MAX` / `BLURD_QUEUE_MAX_BYTES` | queue bounds; bytes is the one that matters |
 | `BLURD_FETCH_MAX_BYTES` | input-size guard on every input path; default 5 MB |
-| `BLURD_STORAGE_MAX_BYTES` | cap on live redacted blobs; 0 = unlimited. Over it: expired TTL blobs are reclaimed, then writes fail `507 storage_full` |
+| `BLURD_STORAGE_MAX_BYTES` | cap on live redacted blobs; 0 = unlimited. Over it: expired TTL blobs are reclaimed, then writes fail `507 storage_full`. Retained originals count too |
+| `BLURD_STORAGE_MAX_DISK_PCT` | **opt-in** disk guard, 0 = off. At or above this % used on the home's filesystem, submits (and queued jobs about to write) fail `507 storage_full`; reads/deletes/sweep keep working. Only meaningful when the blob store shares that disk (local storage, or MinIO on the same host, as in `compose.coolify.yml`); with external S3 it guards blurd's own disk only |
+| `BLURD_STORAGE_DISK_PATH` | filesystem the guard measures; default the home. Point it at a mounted object-store volume if that is a different disk |
 | `BLURD_ORIGINALS_ENABLED` / `_MAX_TTL` / `_URL_MODE` / `_SIGN_TTL` | opt-in source retention (default off, 30 d cap, `authenticated`, 900 s); set = locked in the dashboard. See `spec/originals.md` |
 | `BLURD_ORIGINALS_SIGN_SECRET` | HMAC secret for `signed` url mode; auto-generated and shared via the database if unset |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |

@@ -85,6 +85,14 @@ DEFAULTS = {
         # `storage_full`. Set it on any box where disk exhaustion is the
         # failure to prevent (demo VMs, shared hosts).
         "max_bytes": 0,
+        # Opt-in disk guard: refuse new work once the filesystem holding
+        # `disk_path` (default: the home) is at or above this percentage
+        # used; 0 = off. Unlike max_bytes it sees everything on the disk --
+        # originals, thumbs, the database, other tenants of the volume -- but
+        # only protects the bucket when the object store shares that disk
+        # (e.g. MinIO on the same VM). See spec/storage.md.
+        "max_disk_pct": 0,
+        "disk_path": None,
     },
     # Seconds to let in-flight jobs finish after SIGTERM. Should sit inside
     # the orchestrator's grace period (k8s terminationGracePeriodSeconds).
@@ -249,6 +257,8 @@ ENV_OVERRIDES = {
     "BLURD_DRAIN_SECONDS": ("drain_seconds", int),
     "BLURD_FETCH_MAX_BYTES": ("fetch.max_bytes", int),
     "BLURD_STORAGE_MAX_BYTES": ("storage.max_bytes", int),
+    "BLURD_STORAGE_MAX_DISK_PCT": ("storage.max_disk_pct", int),
+    "BLURD_STORAGE_DISK_PATH": ("storage.disk_path", str),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),

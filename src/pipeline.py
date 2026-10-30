@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from . import db, detect, fetch, originals, redact, store
+from . import db, detect, diskguard, fetch, originals, redact, store
 from .canonical import canonical_json, sha256_hex
 from .config import Config
 from .errors import StorageFull, ValidationError
@@ -156,6 +156,7 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     live = (cached and cached["blob_path"] and not db.artifact_expired(cached))
     if live and not force and blobs.exists(cached["blob_path"]):
         if keep_original:
+            diskguard.check(cfg)
             # The redacted output is cached but these bytes are in hand, so a
             # retention request is honoured on a cache hit too.
             originals.retain(cfg, conn, blobs, sha, raw, mime, keep_original)
@@ -173,6 +174,7 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     timer.mark("decode_ms", t0)
     height, width = img.shape[:2]
     if keep_original:
+        diskguard.check(cfg)
         # After decode, so only a real image is retained; before detection,
         # so the bytes can be dropped now rather than held through the
         # pipeline. A later failure leaves an original that the TTL prunes.
@@ -251,6 +253,12 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     return artifact_result(cfg, conn, row, cached=False, tenant=tenant)
 
 
+def _live_bytes(conn) -> int:
+    """Redacted blobs plus live retained originals: both are source-sized
+    objects in the same store, so both count against `storage.max_bytes`."""
+    return db.live_blob_bytes(conn) + db.live_original_bytes(conn)
+
+
 def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
     """Refuse the write when live blobs would exceed `storage.max_bytes`.
 
@@ -258,10 +266,11 @@ def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
     and a TTL together bound the disk without rejecting work. Same semantics
     as JobQueue.prune_expired -- bounded pass, deletes are idempotent.
     """
+    diskguard.check(cfg)
     cap = int(cfg.get("storage.max_bytes") or 0)
     if not cap:
         return
-    if db.live_blob_bytes(conn) + incoming > cap:
+    if _live_bytes(conn) + incoming > cap:
         for r in db.expired_blobs(conn, 200):
             try:
                 blobs.delete(r["blob_path"])
@@ -269,7 +278,8 @@ def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
                 pass
             db.expire_artifact(conn, r["id"])
         conn.commit()
-    usage = db.live_blob_bytes(conn)
+        originals.prune(cfg, conn, blobs)
+    usage = _live_bytes(conn)
     if usage + incoming > cap:
         raise StorageFull(
             f"Blob storage full: {usage + incoming} bytes would exceed the "

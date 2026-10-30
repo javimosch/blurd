@@ -1180,7 +1180,7 @@
       "responses": [
         {
           "status": "200",
-          "description": "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, tags[]"
+          "description": "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, storage_used_bytes (redacted + retained originals), disk {path,total_bytes,used_bytes,free_bytes,used_pct,max_pct} (operator key only), tags[]"
         }
       ]
     }

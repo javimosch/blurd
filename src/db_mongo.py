@@ -454,6 +454,14 @@ def live_blob_bytes(conn) -> int:
     return int(agg[0]["b"]) if agg else 0
 
 
+def live_original_bytes(conn) -> int:
+    """See db_sql.live_original_bytes."""
+    agg = list(conn.db["originals"].aggregate([
+        {"$match": {"blob_path": {"$ne": ""}}},
+        {"$group": {"_id": None, "b": {"$sum": "$bytes"}}}]))
+    return int(agg[0]["b"]) if agg else 0
+
+
 def expire_artifact(conn, artifact_id: int) -> None:
     """TTL passed: drop the blob reference; keep the record AND the thumbnail
     -- see db_sql.expire_artifact."""

@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from . import auth, db, jobs, originals, pipeline, store as _store
+from . import auth, db, diskguard, jobs, originals, pipeline, store as _store
 from .scope import Scope
 from .config import Config
 from .errors import BlurdError, Expired, Internal, NotFound, Upstream
@@ -171,6 +171,8 @@ class LocalClient:
         s["home"] = str(self.cfg.home)
         if scope is None or scope.is_global:
             s["storage_max_bytes"] = int(self.cfg.get("storage.max_bytes") or 0)
+            s["storage_used_bytes"] = pipeline._live_bytes(conn)
+            s["disk"] = diskguard.usage(self.cfg)
         s["profile_hash"] = Config.hash_of(self.cfg.resolve_profile())
         return s
 

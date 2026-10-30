@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from . import db, originals, pipeline, resources, store
+from . import db, diskguard, originals, pipeline, resources, store
 from .scope import Scope
 from .canonical import canonical_json
 from .config import Config
@@ -245,6 +245,9 @@ class JobQueue:
                                           profile, tags, metadata, on_conflict,
                                           tenant)
 
+        # After the fast path (a code hit writes no bytes), before anything is
+        # queued: a full disk is learned from the submit, not from polling.
+        diskguard.check(self.cfg)
         kind = "url" if url else ("file" if path else "stream")
         if kind == "url":
             # Reject an unfetchable URL now, with a 4xx, rather than accepting

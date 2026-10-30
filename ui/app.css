@@ -15,6 +15,8 @@ header{display:flex;align-items:baseline;gap:20px;padding:16px 22px;
 .brand .sub{font-size:12px;color:var(--dim);font-weight:400;margin-left:10px}
 .counters{display:flex;gap:18px;color:var(--dim);font-size:12px;flex-wrap:wrap}
 .counters b{color:var(--ink);font-weight:600}
+.counters .disk.near b{color:var(--warn)}
+.counters .disk.over,.counters .disk.over b{color:var(--danger)}
 .filters{display:flex;gap:10px;padding:14px 22px;flex-wrap:wrap;align-items:center;
   border-bottom:1px solid var(--line)}
 input[type=text],input:not([type]){}

@@ -124,8 +124,10 @@ what it accepts and any replica can serve the result. See `spec/capacity.md`.
 hard cap on **live** blob bytes, counted as `SUM(artifacts.blob_size)` over
 rows whose `blob_path` is still set — the metadata DB is the meter, so the cap
 works identically on `local` and `s3` and needs no `du` or bucket listing.
-Thumbnails and metadata stay outside the budget: they are small, and they are
-what let the dashboard show an expired artifact rather than a hole.
+Live retained originals (`SUM(originals.bytes)`, spec/originals.md) count too:
+they are source-sized objects in the same store. Thumbnails and metadata stay
+outside the budget: they are small, and they are what let the dashboard show an
+expired artifact rather than a hole.
 
 When a write would exceed the cap the pipeline first reclaims overdue TTL
 blobs (the same bounded, idempotent sweep the reaper runs), and only if the
@@ -133,8 +135,29 @@ blob still does not fit fails the job with `507 storage_full` — recoverable,
 with `retry_after`. A cap plus a TTL therefore bound the disk in both
 dimensions: how much, and for how long.
 
-`/v1/stats` exposes `bytes_live` and `storage_max_bytes` on the unrestricted
-view; scoped keys still cannot read instance size.
+`/v1/stats` exposes `bytes_live`, `storage_max_bytes`, `storage_used_bytes`
+(the figure the cap compares) and `disk` on the unrestricted view; scoped keys
+still cannot read instance size.
+
+## Opt-in disk guard: `storage.max_disk_pct`
+
+`max_bytes` meters what blurd believes it stores. It cannot see the database,
+logs, or anything else on the volume. `storage.max_disk_pct` (env
+`BLURD_STORAGE_MAX_DISK_PCT`, default **0 = off**) asks the filesystem instead:
+`statvfs` on `storage.disk_path` (env `BLURD_STORAGE_DISK_PATH`, default the
+home). At or above the threshold:
+
+* `POST /v1/images` fails **507 `storage_full`** (`retry_after` 300) before
+  anything is queued — after the external_id fast path, which writes no bytes;
+* a queued job about to write a blob or an original fails the same way;
+* reads, deletes and the TTL sweep are untouched — they are how space returns.
+
+It is opt-in because it is only meaningful when the blob store **shares the
+measured disk**: local storage, or MinIO as a container on the same host
+(`compose.coolify.yml` sets it to 90). Against an external S3 bucket it guards
+blurd's own disk and says nothing about the bucket. An unreadable path fails
+open rather than refusing all work. The dashboard header shows disk use and
+the threshold (amber within 5 points, red when refusing).
 
 ## TTL expiry semantics
 
