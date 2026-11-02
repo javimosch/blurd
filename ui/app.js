@@ -78,6 +78,8 @@ function filterQuery() {
   if ($("f-review").checked) q.set("needs_review", "1");
   if ($("f-faces").checked) q.set("has_faces", "1");
   if ($("f-plates").checked) q.set("has_plates", "1");
+  if ($("f-nofaces").checked) q.set("has_faces", "0");
+  if ($("f-noplates").checked) q.set("has_plates", "0");
   if ($("f-since").value) q.set("since", dayStart($("f-since").value));
   if ($("f-until").value) q.set("until", dayEnd($("f-until").value));
   const [sort, direction] = $("f-sort").value.split(":");
@@ -157,7 +159,7 @@ async function load() {
     // submit calls a human needs, not just "nothing here".
     if (data.items.length === 0) {
       const filtered = $("f-review").checked || $("f-faces").checked ||
-        $("f-plates").checked ||
+        $("f-plates").checked || $("f-nofaces").checked || $("f-noplates").checked ||
         ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"]
           .some((i) => $(i).value.trim());
       $("empty").innerHTML = (filtered || state.total > 0)
@@ -290,11 +292,10 @@ async function openDetail(sha, profile) {
     <button class="ghost" id="dl">download</button>
     <button class="ghost" id="api-det">get via API</button>
     <button class="ghost" id="redact">manual redact</button>
+    <button class="ghost" id="fb-btn">feedback</button>
     <button class="ghost" id="reproc" title="Run this image again with the current detection settings (needs its source URL or a retained original)">reprocess</button>
     <button class="danger" id="del">delete</button>
-    <h3>feedback</h3>
-    <div id="fb-list" class="kv"></div>
-    <div class="mintbox">
+    <div id="fb-form" class="mintbox" hidden>
       <select id="fb-kind">
         <option value="false_positive">false positive</option>
         <option value="missed">missed</option>
@@ -304,13 +305,20 @@ async function openDetail(sha, profile) {
       </select>
       <input id="fb-comment" placeholder="what is wrong? (e.g. sticker on the bin blurred as a plate)" style="flex:1;min-width:200px">
       <button id="fb-add">add</button>
-    </div>`;
+    </div>
+    <h3>feedback</h3>
+    <div id="fb-list" class="kv"></div>`;
+  $("fb-btn").onclick = () => {
+    $("fb-form").hidden = !$("fb-form").hidden;
+    if (!$("fb-form").hidden) $("fb-comment").focus();
+  };
   loadFeedback(sha);
   $("fb-add").onclick = async () => {
     try {
       await api(`/images/${sha}/feedback`, { method: "POST", body: JSON.stringify({
         kind: $("fb-kind").value, comment: $("fb-comment").value, profile_hash: profile }) });
       $("fb-comment").value = "";
+      $("fb-form").hidden = true;
       loadFeedback(sha);
     } catch (err) { alert(err.message); }
   };
@@ -1110,12 +1118,19 @@ $("reset").onclick = () => {
   ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) => ($(i).value = ""));
   $("f-review").checked = false;
   $("f-faces").checked = false; $("f-plates").checked = false;
+  $("f-nofaces").checked = false; $("f-noplates").checked = false;
   $("f-sort").value = "created:desc"; $("f-size").value = "24";
   resetPager(state); load();
 };
 $("f-sort").onchange = $("f-size").onchange = () => { resetPager(state); load(); };
-["f-review", "f-faces", "f-plates"].forEach((i) =>
-  ($(i).onchange = () => { resetPager(state); load(); }));
+// "has X" and "without X" are opposites: ticking one clears the other.
+const OPPOSITE = { "f-faces": "f-nofaces", "f-nofaces": "f-faces",
+                   "f-plates": "f-noplates", "f-noplates": "f-plates" };
+["f-review", "f-faces", "f-plates", "f-nofaces", "f-noplates"].forEach((i) =>
+  ($(i).onchange = () => {
+    if (OPPOSITE[i] && $(i).checked) $(OPPOSITE[i]).checked = false;
+    resetPager(state); load();
+  }));
 wirePager(state, { prev: "prev", next: "next", first: "first" }, load);
 
 $("j-apply").onclick = () => { resetPager(jstate); loadJobs(); };
