@@ -136,7 +136,7 @@ PROFILES & TTL
   A profile is the processing configuration: redact mode, detector models and
   thresholds, output format, and optional storage.ttl. The shipped default is:
     {{"detect":{{"face":{{"min_score":0.6,"model":"yunet-2023mar"}},"max_side":1280,
-      "plate":{{"min_aspect":1.0,"min_score":0.35,"model":"yolov9t-512-plates"}}}},
+      "plate":{{"min_aspect":0.75,"min_score":0.35,"model":"yolov9t-512-plates"}}}},
      "output":{{"format":"jpeg","max_side":0,"quality":90}},
      "redact":{{"expand":0.18,"mode":"pixelate",
       "shape":{{"face":"ellipse","plate":"rect"}},"strength":0.06}},"version":1}}
@@ -167,7 +167,7 @@ ORIGINALS (opt-in source retention)
 
 DETECTION TUNING, FEEDBACK, REPROCESS
   detect.face.min_score / detect.plate.min_score: confidence needed to redact.
-  detect.plate.min_aspect: width/height a plate box needs (default 1.0; drops
+  detect.plate.min_aspect: width/height a plate box needs (default 0.75; drops
   stickers and signs, which are tall). All three are editable in the
   dashboard settings tab; a change alters profile_hash, so existing images
   keep their result until reprocessed.

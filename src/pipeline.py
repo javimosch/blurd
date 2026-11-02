@@ -99,8 +99,16 @@ def run_detectors(cfg: Config, img: np.ndarray, profile: Dict[str, Any],
         # Shape sanity: a plate is wider than tall, even a square moto
         # plate seen at an angle. A tall box is a sticker or a sign.
         min_aspect = float(spec.get("min_aspect") or 0)
+        # Size sanity: share of the frame a box may cover. In street photos a
+        # real plate is well under 1%; a box covering 4-20% is a sign, a
+        # barrier or a pile of rubbish. Measured on the working copy, so the
+        # ratio is resolution-independent.
+        max_area = float(spec.get("max_area") or 0)
+        frame = float(work.shape[0] * work.shape[1]) or 1.0
         for d in found:
             if min_aspect and d.h and d.w / d.h < min_aspect:
+                continue
+            if max_area and d.w * d.h / frame > max_area:
                 continue
             if scale != 1.0:
                 d = detect.Detection(d.cls, int(d.x / scale), int(d.y / scale),

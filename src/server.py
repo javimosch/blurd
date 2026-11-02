@@ -725,11 +725,11 @@ class Handler(BaseHTTPRequestHandler):
                 "face": {k: prof["detect"]["face"].get(k)
                          for k in ("min_score",)},
                 "plate": {k: prof["detect"]["plate"].get(k)
-                          for k in ("min_score", "min_aspect")},
+                          for k in ("min_score", "min_aspect", "max_area")},
                 "defaults": {
                     "face": {"min_score": DEFAULT_PROFILE["detect"]["face"]["min_score"]},
                     "plate": {k: DEFAULT_PROFILE["detect"]["plate"].get(k)
-                              for k in ("min_score", "min_aspect")}},
+                              for k in ("min_score", "min_aspect", "max_area")}},
                 "profile_hash": Config.hash_of(prof),
                 "limits": DETECT_LIMITS}})
         if sub.rstrip("/") == "/profile":
@@ -848,8 +848,10 @@ def _feedback_filters(handler, q, default_status) -> dict:
 # Bounds for dashboard-tunable detection settings. Wide enough to experiment,
 # narrow enough that a typo cannot switch a detector off (min_score 1.0) or
 # blur every rectangle in the frame (min_score 0).
-DETECT_LIMITS = {"min_score": [0.05, 0.99], "min_aspect": [0.0, 5.0]}
-_DETECT_KEYS = {"face": ("min_score",), "plate": ("min_score", "min_aspect")}
+DETECT_LIMITS = {"min_score": [0.05, 0.99], "min_aspect": [0.0, 5.0],
+                 "max_area": [0.0, 1.0]}
+_DETECT_KEYS = {"face": ("min_score",),
+                "plate": ("min_score", "min_aspect", "max_area")}
 
 
 def _detect_settings(payload) -> dict:

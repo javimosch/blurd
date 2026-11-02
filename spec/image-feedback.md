@@ -21,14 +21,23 @@ blurd itself (cli-feedback-spec).
 
 ## Detection thresholds
 
-`detect.face.min_score`, `detect.plate.min_score` and `detect.plate.min_aspect`
-(plate width / height; 0 = off) are editable from the dashboard settings tab
-(`/ui-api/profile/detect`), bounded to `min_score` 0.05–0.99 and `min_aspect`
-0–5. They are profile fields, so a change alters `profile_hash`: existing
+`detect.face.min_score`, `detect.plate.min_score`, `detect.plate.min_aspect`
+(plate width / height; 0 = off) and `detect.plate.max_area` (largest share of
+the frame a plate box may cover; 0/absent = off) are editable from the dashboard settings tab
+(`/ui-api/profile/detect`), bounded to `min_score` 0.05–0.99, `min_aspect`
+0–5 and `max_area` 0–1. They are profile fields, so a change alters `profile_hash`: existing
 artifacts keep their result, new submissions produce new artifacts.
 
-`min_aspect` defaults to 1.0. On the isoprod dataset 97 of 748 plate boxes
-were taller than wide; every one sampled was a sticker, sign, wall or rubbish.
+`min_aspect` defaults to 0.75 (0.22.0 shipped 1.0). Validated on 16 reported
+isoprod images re-run from their originals: real plates measured 0.85
+(photographed sideways) and 0.93 (angled), so 1.0 dropped them; the tall false
+positives were a sticker at 0.70 and wall slabs at 0.74-0.76.
+
+`max_area` is off by default because it only suits scenes shot from a
+distance. On the same 16 images, real plates covered at most 3.8% of the frame
+(a close, sideways plate) and false "plates" (street sign, barrier, rubbish,
+wall slabs) 4.9-20%. poc-18-front runs it at 0.04 with face min_score 0.75:
+all 10 real detections kept, false boxes 26 -> 5.
 
 ## Reprocess
 

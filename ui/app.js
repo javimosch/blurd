@@ -817,7 +817,9 @@ async function loadDetectSettings() {
         <b>min score</b>: confidence a detection needs to be redacted. Higher =
         fewer false positives, more misses. <b>plate min aspect</b>: width ÷
         height a plate box needs (plates are wider than tall; 0 = off), which
-        drops stickers and signs. Changing these changes <code>profile_hash</code>:
+        drops stickers and signs. <b>plate max area</b>: largest share of the
+        image a plate box may cover (empty = off), which drops road signs,
+        barriers and rubbish piles. Changing these changes <code>profile_hash</code>:
         existing images keep their result until you <b>reprocess</b> them.
         Current hash <code>${esc(d.profile_hash)}</code>.
       </div>
@@ -825,13 +827,15 @@ async function loadDetectSettings() {
         <div><label>face min score</label>${num("d-fs", d.face.min_score, L.min_score, 0.01, df.face.min_score)}</div>
         <div><label>plate min score</label>${num("d-ps", d.plate.min_score, L.min_score, 0.01, df.plate.min_score)}</div>
         <div><label>plate min aspect</label>${num("d-pa", d.plate.min_aspect, L.min_aspect, 0.05, df.plate.min_aspect ?? 0)}</div>
+        <div><label>plate max area (% of image)</label>${num("d-pm", d.plate.max_area ? +(d.plate.max_area * 100).toFixed(1) : "", [0, 100], 0.5, "off")}</div>
         <button id="d-save">Save</button>
       </div>
       <div id="d-msg"></div>`;
     $("d-save").onclick = async () => {
       const body = { face: { min_score: parseFloat($("d-fs").value) },
                      plate: { min_score: parseFloat($("d-ps").value),
-                              min_aspect: parseFloat($("d-pa").value || "0") } };
+                              min_aspect: parseFloat($("d-pa").value || "0"),
+                              max_area: parseFloat($("d-pm").value || "0") / 100 } };
       try {
         const r = await api("/profile/detect", { method: "POST", body: JSON.stringify(body) });
         $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code></div>`;

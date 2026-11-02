@@ -20,12 +20,14 @@ DEFAULT_PROFILE: Dict[str, Any] = {
     "version": 1,
     "detect": {
         "face": {"model": "yunet-2023mar", "min_score": 0.6},
-        # min_aspect: plates are wider than tall (even a square moto plate
-        # seen at an angle); on the isoprod set every sampled box with
-        # w/h < 1 was a sticker, sign or wall. Adding it changed profile_hash
-        # once (0.22.0) -- knowingly, see AGENTS.md rule 3.
+        # min_aspect: plates are wider than tall. 0.75, not 1.0: on the
+        # isoprod originals two REAL plates measured 0.85 (photographed
+        # sideways) and 0.93 (angled), while the tall false positives were
+        # stickers at 0.70 and slabs at 0.74-0.76. Changes profile_hash
+        # (0.22.x) -- knowingly, see AGENTS.md rule 3. Optional `max_area`
+        # (share of the frame; off by default) caps implausibly big boxes.
         "plate": {"model": "yolov9t-512-plates", "min_score": 0.35,
-                  "min_aspect": 1.0},
+                  "min_aspect": 0.75},
         "max_side": 1280,          # long edge used for detection, boxes scale back
     },
     "redact": {
@@ -196,6 +198,13 @@ class Config:
         for cls in ("face", "plate"):
             if cls in prof.get("detect", {}):
                 prof["detect"][cls]["min_score"] = round(float(prof["detect"][cls]["min_score"]), 3)
+                # 0 / null = off, and absent from the profile: keeps the
+                # default profile_hash identical for instances not using it.
+                if not prof["detect"][cls].get("max_area"):
+                    prof["detect"][cls].pop("max_area", None)
+                else:
+                    prof["detect"][cls]["max_area"] = round(
+                        float(prof["detect"][cls]["max_area"]), 3)
                 if prof["detect"][cls].get("min_aspect") is not None:
                     prof["detect"][cls]["min_aspect"] = round(
                         float(prof["detect"][cls]["min_aspect"]), 3)
