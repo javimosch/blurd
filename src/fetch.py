@@ -65,8 +65,23 @@ def validate_url(url: str, cfg: dict) -> None:
     _validate_url(url, bool(cfg.get("allow_private_ips", False)))
 
 
+def clean_url(url) -> str:
+    """Undo copy-paste damage before fetching: surrounding whitespace and
+    quotes, including a quote the browser already percent-encoded (a URL
+    copied out of JSON arrives as `…/photo.jpg"` or `…/photo.jpg%22`)."""
+    u = str(url or "").strip()
+    for _ in range(2):
+        u = u.strip().strip("\"'")
+        while u.endswith("%22") or u.endswith("%27"):
+            u = u[:-3]
+        while u.startswith("%22") or u.startswith("%27"):
+            u = u[3:]
+    return u
+
+
 def fetch_url(url: str, cfg: dict) -> Tuple[bytes, str]:
     """Return (bytes, mime). Redirects are followed by hand, re-validating each hop."""
+    url = clean_url(url)
     allow_private = bool(cfg.get("allow_private_ips", False))
     timeout = float(cfg.get("timeout_s", 15))
     max_bytes = int(cfg.get("max_bytes", 5 * 1024 * 1024))
@@ -93,7 +108,15 @@ def fetch_url(url: str, cfg: dict) -> Tuple[bytes, str]:
             raise Upstream(f"HTTP {exc.code} fetching image", {"url": current, "status": exc.code},
                            retry_after=5 if exc.code >= 500 else None)
         except Exception as exc:
-            raise Upstream(f"Failed to fetch image: {exc}", {"url": current})
+            msg = f"Failed to fetch image: {exc}"
+            if "timed out" in str(exc):
+                # A connect timeout is usually the network, not the URL: the
+                # host may answer from the internet yet be unreachable from
+                # where blurd runs (firewall, hairpin NAT).
+                msg += (" -- blurd's server could not connect to this host; it "
+                        "may be unreachable from blurd's network even if it "
+                        "opens in your browser. Upload the file instead.")
+            raise Upstream(msg, {"url": current})
 
         with resp:
             mime = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()

@@ -228,6 +228,7 @@ class LocalClient:
                                "another source", {"sha": full})
             raw, _ = fetch.fetch_url(img["source_ref"], fcfg)
         elif source == "url":
+            url = fetch.clean_url(url)
             if not url:
                 raise ValidationError("source=url needs a url")
             raw, _ = fetch.fetch_url(url, fcfg)

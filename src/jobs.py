@@ -253,6 +253,7 @@ class JobQueue:
             # Reject an unfetchable URL now, with a 4xx, rather than accepting
             # the job and failing it a second later where only a poll reveals it.
             from . import fetch
+            url = fetch.clean_url(url)
             fetch.validate_url(url, self.cfg.get("fetch", {}))
         if kind == "file":
             # Read now: the worker runs later and the file may be gone by then.
