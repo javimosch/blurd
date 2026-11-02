@@ -849,7 +849,7 @@
       "method": "POST",
       "group": "producer \u2014 submit images, track jobs",
       "summary": "Run a known image again with the current profile",
-      "description": "Re-runs the pipeline with force=1, using a live retained original if there is one, else the URL the image was submitted from. Use it after changing detection thresholds. Labels and codes stay on the sha.",
+      "description": "Re-runs the pipeline with force=1. `source` says where the original bytes come from, with no fallback between sources: retained (the live opt-in original), source_url (the URL it was first submitted from, re-fetched), url (another URL, in the JSON body), upload (the image bytes as the body). Every source but retained must hash to the same sha (else 422). Labels and codes stay on the sha.",
       "auth": "api key",
       "params": [
         {
@@ -862,6 +862,20 @@
           "description": ""
         },
         {
+          "name": "source",
+          "in": "query",
+          "required": true,
+          "type": "string",
+          "enum": [
+            "retained",
+            "source_url",
+            "url",
+            "upload"
+          ],
+          "default": null,
+          "description": "may also be given in the JSON body; defaults to upload for an image/* body"
+        },
+        {
           "name": "wait",
           "in": "query",
           "required": false,
@@ -869,13 +883,35 @@
           "enum": null,
           "default": null,
           "description": ""
+        },
+        {
+          "name": "keep_original",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": null,
+          "description": "also retain these bytes (not for source=retained); needs originals.enabled"
         }
       ],
       "body": {
         "content_types": [
-          "application/json"
+          "application/json",
+          "image/*"
         ],
         "fields": [
+          {
+            "name": "source",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "url",
+            "type": "string",
+            "required": false,
+            "description": "for source=url"
+          },
           {
             "name": "profile",
             "type": "object",
@@ -887,7 +923,7 @@
       "responses": [
         {
           "status": "200",
-          "description": "finished job (adds reprocess_source: original | url)",
+          "description": "finished job (adds reprocess_source)",
           "schema": "Job"
         },
         {
@@ -900,7 +936,15 @@
         },
         {
           "status": "409",
-          "description": "no way back to the source: not url-submitted and no live original"
+          "description": "the chosen source does not exist for this image (no retained original / not submitted by URL)"
+        },
+        {
+          "status": "422",
+          "description": "no or unknown source, or the bytes are a different image"
+        },
+        {
+          "status": "502",
+          "description": "the URL could not be fetched"
         }
       ]
     },

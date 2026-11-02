@@ -41,15 +41,24 @@ all 10 real detections kept, false boxes 26 -> 5.
 
 ## Reprocess
 
-`POST /v1/images/{sha}/reprocess[?wait=S]` re-runs one image with the CURRENT
-profile and `force=1`. The source was never stored (rule 1), so it needs a way
-back to the bytes, in this order:
+`POST /v1/images/{sha}/reprocess?source=…[&wait=S][&keep_original=S]` re-runs
+one image with the CURRENT profile and `force=1`. The source was never stored
+(rule 1), so the caller picks where the bytes come from. There is deliberately
+**no fallback chain**: a failure names the one source that failed, and the
+user picks another.
 
-1. a live retained original (`keep_original`, spec/originals.md);
-2. the URL the image was submitted from (`images.source_ref`), re-fetched
-   through the normal SSRF-checked fetcher.
+| source | bytes from | fails with |
+|---|---|---|
+| `retained` | the live opt-in original (spec/originals.md) | 409 none kept / expired |
+| `source_url` | `images.source_ref`, re-fetched now | 409 not url-submitted; 502 unreachable |
+| `url` | `{"url": …}` in the body | 502 unreachable |
+| `upload` | the request body (`Content-Type: image/*`) | — |
 
-Neither available (an upload with no original) is `409 resource_conflict`.
-If the URL now serves different bytes, the result is a different `source_sha`.
-Labels and codes stay attached to the sha. Manual regions belong to the old
-artifact and are not carried over.
+Every source but `retained` must hash to the image's sha (422 otherwise):
+reprocess is not a new submission. `keep_original` additionally retains the
+bytes, so the next round can use `retained`. Labels and codes stay on the sha;
+manual regions belong to the old artifact and are not carried over.
+
+The dashboard's reprocess button opens this choice (unavailable sources
+greyed out). Bulk reprocess (`/ui-api/reprocess`, page or open feedback) takes
+`retained` or `source_url` only.

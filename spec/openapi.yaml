@@ -374,21 +374,30 @@ paths:
     post:
       summary: Run a known image again with the current profile
       description: >
-        Re-runs the pipeline with force=1, using a live retained original if
-        there is one, else the URL the image was submitted from. Use it after
-        changing detection thresholds. Labels and codes stay on the sha.
+        Re-runs the pipeline with force=1. `source` says where the original
+        bytes come from, with no fallback between sources: retained (the live
+        opt-in original), source_url (the URL it was first submitted from,
+        re-fetched), url (another URL, in the JSON body), upload (the image
+        bytes as the body). Every source but retained must hash to the same
+        sha (else 422). Labels and codes stay on the sha.
       parameters:
         - { in: path, name: sha, required: true, schema: { type: string } }
+        - { in: query, name: source, required: true, schema: { type: string, enum: [retained, source_url, url, upload] }, description: "may also be given in the JSON body; defaults to upload for an image/* body" }
         - { in: query, name: wait, schema: { type: number, maximum: 120 } }
+        - { in: query, name: keep_original, schema: { type: integer }, description: "also retain these bytes (not for source=retained); needs originals.enabled" }
       requestBody:
         content:
           application/json:
-            schema: { type: object, properties: { profile: { type: object, description: "optional per-request profile overrides" } } }
+            schema: { type: object, properties: { source: { type: string }, url: { type: string, description: "for source=url" }, profile: { type: object, description: "optional per-request profile overrides" } } }
+          image/*:
+            schema: { type: string, format: binary, description: "for source=upload" }
       responses:
-        "200": { description: "finished job (adds reprocess_source: original | url)", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        "200": { description: "finished job (adds reprocess_source)", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
         "202": { description: "job still running" }
         "404": { description: "unknown or out-of-scope image" }
-        "409": { description: "no way back to the source: not url-submitted and no live original" }
+        "409": { description: "the chosen source does not exist for this image (no retained original / not submitted by URL)" }
+        "422": { description: "no or unknown source, or the bytes are a different image" }
+        "502": { description: "the URL could not be fetched" }
   /v1/thumbs/{sha}:
     get:
       summary: Thumbnail for grid views

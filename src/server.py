@@ -384,9 +384,7 @@ class Handler(BaseHTTPRequestHandler):
                 m.group("fid"), body.get("resolution", ""), scope)})
         m = re.match(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/reprocess$", path)
         if m and method == "POST":
-            body = self._json_body()
-            wait = min(float(self._one(q, "wait", 0) or 0), 120.0)
-            job = client.reprocess(m.group("sha"), body.get("profile"), wait, scope)
+            job = self._reprocess(client, m.group("sha"), q, scope)
             return self._send(200 if job["status"] in ("done", "failed") else 202,
                               {"ok": True, "data": job})
 
@@ -407,6 +405,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._submit(client, q, scope)
 
         raise NotFound("endpoint", f"{method} {path}")
+
+    def _reprocess(self, client, sha, q, scope, default_wait=0.0):
+        """One reprocess request: ?source= picks where the bytes come from.
+        An image/* body is the upload; otherwise the body is JSON
+        ({url, profile})."""
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        source = self._one(q, "source")
+        data, body = None, {}
+        if ctype.startswith("image/") or ctype == "application/octet-stream":
+            data = self._body()
+            source = source or "upload"
+        else:
+            body = self._json_body()
+            source = source or body.get("source")
+        wait = min(float(self._one(q, "wait", default_wait) or 0), 120.0)
+        keep = self._one(q, "keep_original") or body.get("keep_original")
+        if keep and source != "retained":
+            keep = originals.requested_ttl(client.cfg, db.connect(client.cfg.db_file), keep)
+        return client.reprocess(sha, source, body.get("profile"), wait, scope,
+                                url=body.get("url"), data=data,
+                                keep_original=keep or None)
 
     def _json_body(self) -> dict:
         raw = self._body()
@@ -803,6 +822,10 @@ class Handler(BaseHTTPRequestHandler):
             # Bulk: after tuning thresholds, re-run a set of images. Queued,
             # not waited on -- progress shows in the jobs tab.
             body = self._json_body()
+            source = body.get("source")
+            if source not in ("retained", "source_url"):
+                raise ValidationError("Bulk reprocess needs source: retained "
+                                      "or source_url", {"got": source})
             shas = body.get("shas")
             if body.get("feedback") == "open":
                 rows = client.feedback_list(None, status="open", limit=500)["items"]
@@ -814,7 +837,7 @@ class Handler(BaseHTTPRequestHandler):
             queued, skipped = [], []
             for sha in shas:
                 try:
-                    job = client.reprocess(str(sha), None, 0.0)
+                    job = client.reprocess(str(sha), source, None, 0.0)
                     queued.append({"sha": sha, "job_id": job["job_id"],
                                    "source": job.get("reprocess_source")})
                 except BlurdError as e:
@@ -827,7 +850,7 @@ class Handler(BaseHTTPRequestHandler):
                 "queued": queued, "skipped": skipped}})
         m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/reprocess$", sub)
         if m and self.command == "POST":
-            job = client.reprocess(m.group("sha"), None, 60.0)
+            job = self._reprocess(client, m.group("sha"), q, None, 60.0)
             db.audit(conn, "dashboard", "image.reprocess", m.group("sha"),
                      self.address_string(), {"job": job.get("job_id"),
                                              "source": job.get("reprocess_source")})

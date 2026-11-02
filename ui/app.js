@@ -309,6 +309,20 @@ async function openDetail(sha, profile) {
     <button class="ghost" id="fb-btn">feedback</button>
     <button class="ghost" id="reproc" title="Run this image again with the current detection settings (needs its source URL or a retained original)">reprocess</button>
     <button class="danger" id="del">delete</button>
+    <div id="rp-form" class="mintbox" hidden style="flex-direction:column;align-items:flex-start;gap:6px">
+      <b>reprocess with the current settings: where should the original come from?</b>
+      <label class="chk"><input type="radio" name="rp-src" value="retained"${d.original ? "" : " disabled"}>
+        retained original ${d.original ? `(kept until ${esc(d.original.expires_at)})` : "(none kept)"}</label>
+      <label class="chk"><input type="radio" name="rp-src" value="source_url"${d.image.source_kind === "url" ? "" : " disabled"}>
+        source URL ${d.image.source_kind === "url" ? `<code>${esc(d.image.source_ref || "")}</code>` : "(not submitted by URL)"}</label>
+      <label class="chk"><input type="radio" name="rp-src" value="url"> another URL
+        <input id="rp-url" placeholder="https://…/same-image.jpg" style="min-width:260px"></label>
+      <label class="chk"><input type="radio" name="rp-src" value="upload"> upload the file
+        <input id="rp-file" type="file" accept="image/*"></label>
+      <label class="chk"><input type="checkbox" id="rp-keep"> also keep the original for 30 days (so it can be reprocessed again)</label>
+      <small style="color:var(--dim)">The image must be byte-identical to the one stored (same sha). Hand-drawn regions on the old version are not carried over. No fallback: if the source fails, pick another.</small>
+      <button id="rp-go">reprocess</button>
+    </div>
     <div id="fb-form" class="mintbox" hidden>
       <select id="fb-kind">
         <option value="false_positive">false positive</option>
@@ -336,19 +350,32 @@ async function openDetail(sha, profile) {
       loadFeedback(sha);
     } catch (err) { alert(err.message); }
   };
-  $("reproc").onclick = async () => {
-    if (!confirm("Reprocess with the current detection settings? Manual regions on this version are not carried over.")) return;
-    $("reproc").disabled = true; $("reproc").textContent = "reprocessing…";
+  $("reproc").onclick = () => { $("rp-form").hidden = !$("rp-form").hidden; };
+  $("rp-go").onclick = async () => {
+    const src = (document.querySelector('input[name="rp-src"]:checked') || {}).value;
+    if (!src) return alert("Pick a source first.");
+    const qs = new URLSearchParams({ source: src });
+    if ($("rp-keep").checked && src !== "retained") qs.set("keep_original", "2592000");
+    const opts = { method: "POST" };
+    if (src === "upload") {
+      const f = $("rp-file").files[0];
+      if (!f) return alert("Choose the image file.");
+      opts.body = f; opts.headers = { "Content-Type": f.type || "image/jpeg" };
+    } else {
+      opts.body = JSON.stringify(src === "url" ? { url: $("rp-url").value.trim() } : {});
+      opts.headers = { "Content-Type": "application/json" };
+    }
+    $("rp-go").disabled = true; $("rp-go").textContent = "reprocessing…";
     try {
-      const job = await api(`/images/${sha}/reprocess`, { method: "POST", body: "{}" });
+      const job = await api(`/images/${sha}/reprocess?${qs}`, opts);
       const r = job.result;
       if (job.status === "done" && r) {
         closeModal(); load(); loadStats(); openDetail(r.source_sha, r.profile_hash);
       } else {
         alert(`job ${job.job_id}: ${job.status}` + (job.error ? " — " + job.error.message : ""));
       }
-    } catch (err) { alert(err.message); }
-    finally { $("reproc").disabled = false; $("reproc").textContent = "reprocess"; }
+    } catch (err) { alert(err.message + "\n\nPick another source or try again."); }
+    finally { $("rp-go").disabled = false; $("rp-go").textContent = "reprocess"; }
   };
   $("dl").onclick = () => window.open(`/ui-api/blobs/${sha}?profile=${profile}`, "_blank");
   $("api-det").onclick = () => {
@@ -854,9 +881,12 @@ async function loadDetectSettings() {
         const r = await api("/profile/detect", { method: "POST", body: JSON.stringify(body) });
         $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code>.
           Existing images keep their old result until reprocessed:
-          <button id="d-rp-fb">reprocess images with open feedback</button>
+          reprocess images with open feedback from
+          <button id="d-rp-fb-r">retained originals</button>
+          <button id="d-rp-fb-u">source URLs</button>
           or filter the images tab and use <b>Reprocess page</b>.</div>`;
-        $("d-rp-fb").onclick = () => reprocessBatch({ feedback: "open" }, "images with open feedback");
+        $("d-rp-fb-r").onclick = () => reprocessBatch({ feedback: "open", source: "retained" }, "images with open feedback");
+        $("d-rp-fb-u").onclick = () => reprocessBatch({ feedback: "open", source: "source_url" }, "images with open feedback");
       } catch (err) { alert(err.message); }
     };
   } catch (err) {
@@ -1138,8 +1168,9 @@ function resetPager(p) { p.stack = []; p.cursor = null; p.nextCursor = null; }
 $("apply").onclick = () => { resetPager(state); load(); };
 $("reproc-page").onclick = () => {
   if (!pageShas.length) return;
-  if (!confirm(`Reprocess the ${pageShas.length} images on this page with the current detection settings?`)) return;
-  reprocessBatch({ shas: pageShas }, "page");
+  const src = $("reproc-src").value;
+  if (!confirm(`Reprocess the ${pageShas.length} images on this page from their ${src === "retained" ? "retained originals" : "source URLs"}?`)) return;
+  reprocessBatch({ shas: pageShas, source: src }, "page");
 };
 $("reset").onclick = () => {
   ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) => ($(i).value = ""));

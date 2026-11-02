@@ -66,9 +66,11 @@ COMMANDS
   image-feedback list [--status open|resolved|all] [--kind K] [--sha S]
                       [--since ISO] [--limit N]   Newest first.
   image-feedback resolve <id> [--resolution T]    Mark it handled.
-  reprocess <sha> [--wait S]  Run a known image again with the CURRENT
-                              profile (after changing thresholds). Needs a
-                              live retained original or a url-submitted image.
+  reprocess <sha> --source retained|source_url|url|upload [--url U]
+            [--file F] [--keep-original S] [--wait S]
+                              Run a known image again with the CURRENT
+                              profile. No fallback between sources; non-
+                              retained bytes must match the sha.
   jobs list [--status S] [--code C]   Recent jobs and queue depth.
   jobs get <job_id> [--wait S]        One job; --wait long-polls.
   list                        Filter stored artifacts.
@@ -173,8 +175,8 @@ DETECTION TUNING, FEEDBACK, REPROCESS
   keep their result until reprocessed.
   POST /v1/images/<sha>/feedback {{kind, comment, box?}} records feedback;
   GET /v1/image-feedback?status=open is the fast read for agents.
-  POST /v1/images/<sha>/reprocess[?wait=S] re-runs one image (source url or
-  retained original; 409 when neither exists).
+  POST /v1/images/<sha>/reprocess?source=retained|source_url|url|upload
+  re-runs one image; the caller picks the source, no fallback.
 
 OUTPUT CONTRACT
   JSON on stdout by default: {{"version":"1.0","data":...,"timestamp":...}}

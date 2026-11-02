@@ -14,12 +14,13 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from . import (auth, db, diskguard, image_feedback, jobs, originals, pipeline,
-               store as _store)
+from . import (auth, db, diskguard, fetch, image_feedback, jobs, originals,
+               pipeline, store as _store)
 from .scope import Scope
 from .config import Config
+from .canonical import sha256_hex
 from .errors import (BlurdError, Conflict, Expired, Internal, NotFound,
-                     Upstream)
+                     Upstream, ValidationError)
 
 
 class LocalClient:
@@ -179,13 +180,29 @@ class LocalClient:
         return image_feedback.resolve(db.connect(self.cfg.db_file), fid,
                                       resolution, scope)
 
-    def reprocess(self, sha: str, overrides=None, wait: float = 0.0,
-                  scope: Scope = None) -> Dict[str, Any]:
+    REPROCESS_SOURCES = ("retained", "source_url", "url", "upload")
+
+    def reprocess(self, sha: str, source: str, overrides=None, wait: float = 0.0,
+                  scope: Scope = None, url: str = None, data: bytes = None,
+                  keep_original=None) -> Dict[str, Any]:
         """Run an already-known image through the pipeline again, with the
-        CURRENT profile (plus overrides). The source was never stored (rule 1),
-        so this needs a way back to the bytes: a live retained original, else
-        the URL it was fetched from. force=1 so an unchanged profile still
-        re-runs; labels and codes stay attached to the sha."""
+        CURRENT profile (plus overrides) and force=1.
+
+        The source was never stored (rule 1), so the caller says where the
+        bytes come from -- explicitly, with no fallback chain, so a failure
+        names the one source that failed:
+
+          retained    the live opt-in original (spec/originals.md)
+          source_url  the URL the image was first submitted from, re-fetched
+          url         another URL serving the same image
+          upload      the bytes, sent by the caller
+
+        Anything but `retained` must hash to the same sha: this is reprocess,
+        not a new submission. Labels and codes stay on the sha."""
+        if source not in self.REPROCESS_SOURCES:
+            raise ValidationError(
+                "source must be one of " + ", ".join(self.REPROCESS_SOURCES),
+                {"got": source, "known": list(self.REPROCESS_SOURCES)})
         conn = db.connect(self.cfg.db_file)
         row = db.find_artifact_by_sha_prefix(conn, sha)
         if not row:
@@ -194,24 +211,40 @@ class LocalClient:
         if scope is not None and not scope.is_global \
                 and not scope.allows_sha(conn, full):
             raise NotFound("image", sha)
-        orig, expired = originals.lookup(self.cfg, conn, full)
-        if orig is not None and not expired and orig["blob_path"]:
-            data = _store.build(self.cfg).get(orig["blob_path"])
-            job = self.submit(data=data, overrides=overrides, force=True,
-                              wait=wait, scope=scope)
-            job["reprocess_source"] = "original"
-            return job
-        img = db.find_image(conn, full)
-        if img is not None and img["source_kind"] == "url" and img["source_ref"]:
-            job = self.submit(url=img["source_ref"], overrides=overrides,
-                              force=True, wait=wait, scope=scope)
-            job["reprocess_source"] = "url"
-            return job
-        raise Conflict(
-            "Cannot reprocess: the source image was not kept and was not "
-            "submitted by URL; resubmit the original bytes with ?force=1, or "
-            "submit with keep_original=SECONDS next time",
-            {"sha": full, "source_kind": img["source_kind"] if img else None})
+        fcfg = self.cfg.get("fetch", {})
+        if source == "retained":
+            orig, expired = originals.lookup(self.cfg, conn, full)
+            if orig is None or expired or not orig["blob_path"]:
+                raise Conflict("No retained original for this image (never "
+                               "kept, or its retention expired); choose "
+                               "another source",
+                               {"sha": full, "expired": bool(expired)})
+            raw = _store.build(self.cfg).get(orig["blob_path"])
+            keep_original = None        # already retained; keep its deadline
+        elif source == "source_url":
+            img = db.find_image(conn, full)
+            if img is None or img["source_kind"] != "url" or not img["source_ref"]:
+                raise Conflict("This image was not submitted by URL; choose "
+                               "another source", {"sha": full})
+            raw, _ = fetch.fetch_url(img["source_ref"], fcfg)
+        elif source == "url":
+            if not url:
+                raise ValidationError("source=url needs a url")
+            raw, _ = fetch.fetch_url(url, fcfg)
+        else:
+            if not data:
+                raise ValidationError("source=upload needs the image bytes "
+                                      "as the request body")
+            raw = data
+        got = sha256_hex(raw)
+        if got != full:
+            raise ValidationError(
+                "These bytes are a different image than the one being "
+                "reprocessed", {"expected_sha": full, "got_sha": got})
+        job = self.submit(data=raw, overrides=overrides, force=True, wait=wait,
+                          scope=scope, keep_original=keep_original)
+        job["reprocess_source"] = source
+        return job
 
     def stats(self, scope: Scope = None) -> Dict[str, Any]:
         conn = db.connect(self.cfg.db_file)
@@ -427,10 +460,21 @@ class RemoteClient:
         return self._call("POST", f"/v1/image-feedback/{fid}/resolve",
                           body={"resolution": resolution})
 
-    def reprocess(self, sha, overrides=None, wait=0.0):
+    def reprocess(self, sha, source, overrides=None, wait=0.0, url=None,
+                  data=None, keep_original=None):
+        q = {"source": source}
+        if wait:
+            q["wait"] = str(wait)
+        if keep_original:
+            q["keep_original"] = str(int(keep_original))
+        if source == "upload":
+            return self._call("POST", f"/v1/images/{sha}/reprocess", raw=data,
+                              content_type="image/jpeg", query=q)
         body = {"profile": overrides} if overrides else {}
+        if url:
+            body["url"] = url
         return self._call("POST", f"/v1/images/{sha}/reprocess", body=body,
-                          query={"wait": str(wait)} if wait else None)
+                          query=q)
 
     def stats(self):
         return self._call("GET", "/v1/stats")

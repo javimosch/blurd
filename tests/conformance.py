@@ -520,7 +520,8 @@ def main():
                            headers=authed, body=b'{"face":{"min_score":1.5}}')
         check("an out-of-range threshold is refused", s == 422, f"got {s}")
         s, b, _ = http_raw(f"{a.url}/ui-api/reprocess", method="POST",
-                           headers=authed, body=json.dumps({"shas": [sha]}).encode())
+                           headers=authed,
+                           body=json.dumps({"shas": [sha], "source": "retained"}).encode())
         rb = json.loads(b or b"{}").get("data") or {}
         check("bulk reprocess reports an upload with no source as skipped",
               s == 200 and len(rb.get("skipped", [])) == 1
@@ -884,7 +885,26 @@ def main():
     check("resolved feedback leaves the open listing", fb.get("id") not in ids)
     s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess", "POST", a.api_key,
                    b"{}", "application/json")
-    check("reprocess of an uploaded image with no original is 409", s == 409,
+    check("reprocess without a source is 422 (no implicit fallback)", s == 422,
+          f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess?source=retained", "POST",
+                   a.api_key, b"{}", "application/json")
+    check("reprocess from a retained original that was never kept is 409",
+          s == 409, f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess?source=source_url", "POST",
+                   a.api_key, b"{}", "application/json")
+    check("reprocess from the source URL of an upload is 409", s == 409, f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess?source=upload&wait=60",
+                   "POST", a.api_key, raw, "image/jpeg")
+    rj = json.loads(b or b"{}").get("data") or {}
+    check("reprocess from an uploaded file of the same image runs",
+          s == 200 and rj.get("status") == "done"
+          and rj.get("reprocess_source") == "upload"
+          and (rj.get("result") or {}).get("source_sha") == sha,
+          f"got {s}/{rj.get('status')}")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess?source=upload", "POST",
+                   a.api_key, _mark_bytes(raw, f"other-{time.time_ns()}"), "image/jpeg")
+    check("reprocess refuses a file that is a different image (422)", s == 422,
           f"got {s}")
 
     # Last on purpose: it deletes an image, and earlier checks pick "the
@@ -943,12 +963,12 @@ def main():
             s, _, _ = http(f"{a.url}/v1/originals/{ksha}", key=a.scoped_key_b)
             check("an out-of-scope key gets 404 for the original", s == 404,
                   f"got {s}")
-        s, b, _ = http(f"{a.url}/v1/images/{ksha}/reprocess?wait=60", "POST",
-                       a.api_key, b"{}", "application/json")
+        s, b, _ = http(f"{a.url}/v1/images/{ksha}/reprocess?wait=60&source=retained",
+                       "POST", a.api_key, b"{}", "application/json")
         rj = json.loads(b or b"{}").get("data") or {}
         check("reprocess re-runs from a live retained original",
               s == 200 and rj.get("status") == "done"
-              and rj.get("reprocess_source") == "original"
+              and rj.get("reprocess_source") == "retained"
               and (rj.get("result") or {}).get("source_sha") == ksha,
               f"got {s}/{rj.get('status')}/{rj.get('reprocess_source')}")
         s, body = submit_keep(kept, 60)

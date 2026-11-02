@@ -116,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("reprocess", help="Run a known image again with the "
                         "current profile (needs its source URL or a retained original)")
     rp.add_argument("sha"); rp.add_argument("--wait", type=float, default=60.0)
+    rp.add_argument("--source", required=True,
+                    choices=["retained", "source_url", "url", "upload"],
+                    help="where the bytes come from; no fallback between sources")
+    rp.add_argument("--url", help="for --source url")
+    rp.add_argument("--file", help="for --source upload")
+    rp.add_argument("--keep-original", type=int, metavar="SECONDS")
 
     jb = sub.add_parser("jobs", help="Inspect async jobs")
     js = jb.add_subparsers(dest="jobs_cmd")
@@ -600,7 +606,10 @@ def run(args, out: Out) -> int:
         return EXIT_SUCCESS
 
     if cmd == "reprocess":
-        out.emit(cl.reprocess(args.sha, None, args.wait))
+        data = Path(args.file).read_bytes() if args.file else None
+        out.emit(cl.reprocess(args.sha, args.source, None, args.wait,
+                              url=args.url, data=data,
+                              keep_original=args.keep_original))
         return EXIT_SUCCESS
 
     if cmd == "delete":
