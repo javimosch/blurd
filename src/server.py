@@ -799,6 +799,32 @@ class Handler(BaseHTTPRequestHandler):
                      self.address_string())
             conn.commit()
             return self._send(200, {"ok": True, "data": data})
+        if sub.rstrip("/") == "/reprocess" and self.command == "POST":
+            # Bulk: after tuning thresholds, re-run a set of images. Queued,
+            # not waited on -- progress shows in the jobs tab.
+            body = self._json_body()
+            shas = body.get("shas")
+            if body.get("feedback") == "open":
+                rows = client.feedback_list(None, status="open", limit=500)["items"]
+                shas = list(dict.fromkeys(r["source_sha"] for r in rows))
+            if not isinstance(shas, list) or not shas:
+                raise ValidationError('Pass {"shas": [...]} or {"feedback": "open"}')
+            if len(shas) > 500:
+                raise ValidationError("At most 500 images per call", {"got": len(shas)})
+            queued, skipped = [], []
+            for sha in shas:
+                try:
+                    job = client.reprocess(str(sha), None, 0.0)
+                    queued.append({"sha": sha, "job_id": job["job_id"],
+                                   "source": job.get("reprocess_source")})
+                except BlurdError as e:
+                    skipped.append({"sha": sha, "reason": e.message})
+            db.audit(conn, "dashboard", "image.reprocess_batch", "batch",
+                     self.address_string(), {"queued": len(queued),
+                                             "skipped": len(skipped)})
+            conn.commit()
+            return self._send(200, {"ok": True, "data": {
+                "queued": queued, "skipped": skipped}})
         m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/reprocess$", sub)
         if m and self.command == "POST":
             job = client.reprocess(m.group("sha"), None, 60.0)

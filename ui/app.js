@@ -140,6 +140,19 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+let pageShas = [];
+
+// Bulk reprocess: queue jobs, report what could not be re-run (no source).
+async function reprocessBatch(body, what) {
+  try {
+    const r = await api("/reprocess", { method: "POST", body: JSON.stringify(body) });
+    const why = [...new Set(r.skipped.map((x) => x.reason))].join("; ");
+    alert(`${what}: ${r.queued.length} queued, ${r.skipped.length} skipped` +
+      (why ? `\n\nskipped because: ${why}` : "") +
+      "\n\nProgress: jobs tab. Images whose source URL is unreachable fail there.");
+  } catch (err) { alert(err.message); }
+}
+
 async function load() {
   const grid = $("grid");
   grid.innerHTML = "";
@@ -153,6 +166,7 @@ async function load() {
     }
     state.shown = data.items.length;
     state.nextCursor = data.next_cursor;
+    pageShas = data.items.map((i) => i.source_sha);
     data.items.forEach((i) => grid.appendChild(card(i)));
     // Empty has two causes: no match under active filters, or a fresh install
     // with nothing stored. The second is the onboarding moment — show the two
@@ -838,7 +852,11 @@ async function loadDetectSettings() {
                               max_area: parseFloat($("d-pm").value || "0") / 100 } };
       try {
         const r = await api("/profile/detect", { method: "POST", body: JSON.stringify(body) });
-        $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code></div>`;
+        $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code>.
+          Existing images keep their old result until reprocessed:
+          <button id="d-rp-fb">reprocess images with open feedback</button>
+          or filter the images tab and use <b>Reprocess page</b>.</div>`;
+        $("d-rp-fb").onclick = () => reprocessBatch({ feedback: "open" }, "images with open feedback");
       } catch (err) { alert(err.message); }
     };
   } catch (err) {
@@ -1118,6 +1136,11 @@ function wirePager(p, ids, reload) {
 function resetPager(p) { p.stack = []; p.cursor = null; p.nextCursor = null; }
 
 $("apply").onclick = () => { resetPager(state); load(); };
+$("reproc-page").onclick = () => {
+  if (!pageShas.length) return;
+  if (!confirm(`Reprocess the ${pageShas.length} images on this page with the current detection settings?`)) return;
+  reprocessBatch({ shas: pageShas }, "page");
+};
 $("reset").onclick = () => {
   ["f-tag", "f-meta", "f-sha", "f-code", "f-since", "f-until"].forEach((i) => ($(i).value = ""));
   $("f-review").checked = false;

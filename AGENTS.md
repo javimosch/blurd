@@ -62,7 +62,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Seam guard | `tests/seam_check.py` |
 | Throughput, capacity, scaling | `bench/throughput.py`, `spec/capacity.md` |
 | Listing performance, pagination | `db_sql.py` / `db_mongo.py` (`bulk_labels`, `query_artifacts`), `spec/scaling.md` |
-| Black-box conformance (191 checks) | `tests/conformance.py` |
+| Black-box conformance (192 checks) | `tests/conformance.py` |
 | Two backends must answer identically (77 checks) | `tests/backend_parity.py` |
 | Queue backpressure and the byte bound | `tests/queue_bytes.py` |
 | **How to deploy anything** (the operator hub) | `docs/deployment.md` |

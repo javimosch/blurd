@@ -519,6 +519,12 @@ def main():
         s, b, _ = http_raw(f"{a.url}/ui-api/profile/detect", method="POST",
                            headers=authed, body=b'{"face":{"min_score":1.5}}')
         check("an out-of-range threshold is refused", s == 422, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/reprocess", method="POST",
+                           headers=authed, body=json.dumps({"shas": [sha]}).encode())
+        rb = json.loads(b or b"{}").get("data") or {}
+        check("bulk reprocess reports an upload with no source as skipped",
+              s == 200 and len(rb.get("skipped", [])) == 1
+              and not rb.get("queued"), f"got {s} {b[:120]}")
 
     print("\n-- concurrent dedup race")
     # Two workers processing the same (source_sha, profile_hash) must both end
