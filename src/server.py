@@ -21,7 +21,7 @@ from pathlib import Path
 from . import (__version__, auth, db, jobs as jobs_mod, originals, pipeline,
                plugins, scope as scope_mod)
 from .client import LocalClient
-from .config import Config, REDACT_MODES
+from .config import Config, DEFAULT_PROFILE, REDACT_MODES
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
                      NotFound, RateLimited, ValidationError)
 
@@ -33,6 +33,11 @@ _ROUTES = [
     ("GET",    re.compile(r"^/v1/images/?$")),
     ("GET",    re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})$")),
     ("DELETE", re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})$")),
+    ("GET",    re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/feedback$")),
+    ("POST",   re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/feedback$")),
+    ("POST",   re.compile(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/reprocess$")),
+    ("GET",    re.compile(r"^/v1/image-feedback/?$")),
+    ("POST",   re.compile(r"^/v1/image-feedback/(?P<fid>fb_[0-9a-f]{16})/resolve$")),
     ("GET",    re.compile(r"^/v1/blobs/(?P<sha>[0-9a-f]{6,64})$")),
     ("GET",    re.compile(r"^/v1/thumbs/(?P<sha>[0-9a-f]{6,64})$")),
     ("GET",    re.compile(r"^/v1/originals/(?P<sha>[0-9a-f]{64})$")),
@@ -360,6 +365,31 @@ class Handler(BaseHTTPRequestHandler):
                                      self._one(q, "profile"),
                                      thumb=path.startswith("/v1/thumbs"), scope=scope)
 
+        m = re.match(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/feedback$", path)
+        if m:
+            if method == "POST":
+                rec = client.feedback_add(m.group("sha"), self._json_body(), scope,
+                                          author=f"key:{principal['name']}")
+                return self._send(201, {"ok": True, "data": rec})
+            if method == "GET":
+                return self._send(200, {"ok": True, "data": client.feedback_list(
+                    scope, sha=m.group("sha"), **_feedback_filters(self, q, "all"))})
+        if path.rstrip("/") == "/v1/image-feedback" and method == "GET":
+            return self._send(200, {"ok": True, "data": client.feedback_list(
+                scope, **_feedback_filters(self, q, "open"))})
+        m = re.match(r"^/v1/image-feedback/(?P<fid>fb_[0-9a-f]{16})/resolve$", path)
+        if m and method == "POST":
+            body = self._json_body()
+            return self._send(200, {"ok": True, "data": client.feedback_resolve(
+                m.group("fid"), body.get("resolution", ""), scope)})
+        m = re.match(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})/reprocess$", path)
+        if m and method == "POST":
+            body = self._json_body()
+            wait = min(float(self._one(q, "wait", 0) or 0), 120.0)
+            job = client.reprocess(m.group("sha"), body.get("profile"), wait, scope)
+            return self._send(200 if job["status"] in ("done", "failed") else 202,
+                              {"ok": True, "data": job})
+
         m = re.match(r"^/v1/images/(?P<sha>[0-9a-f]{6,64})$", path)
         if m:
             if method == "GET":
@@ -377,6 +407,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._submit(client, q, scope)
 
         raise NotFound("endpoint", f"{method} {path}")
+
+    def _json_body(self) -> dict:
+        raw = self._body()
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            raise ValidationError("Request body is not valid JSON")
+        if not isinstance(body, dict):
+            raise ValidationError("Request body must be a JSON object")
+        return body
 
     def _serve_original(self, client, sha, scope):
         data, mime = client.original(sha, scope)
@@ -668,6 +708,30 @@ class Handler(BaseHTTPRequestHandler):
                 data, step_up_required=bool(cfg.get("dashboard_key_secret")),
                 url_modes=list(originals.URL_MODES),
                 hard_max_ttl=originals.HARD_MAX_TTL)})
+        if sub.rstrip("/") == "/profile/detect":
+            if self.command == "POST":
+                try:
+                    payload = json.loads(self._body() or b"{}")
+                except ValueError:
+                    raise ValidationError("Request body is not valid JSON")
+                changes = _detect_settings(payload)
+                for key, value in changes.items():
+                    cfg.set(f"profile.detect.{key}", value)
+                db.audit(conn, "dashboard", "profile.detect", "detect",
+                         self.address_string(), changes)
+                conn.commit()
+            prof = cfg.resolve_profile()
+            return self._send(200, {"ok": True, "data": {
+                "face": {k: prof["detect"]["face"].get(k)
+                         for k in ("min_score",)},
+                "plate": {k: prof["detect"]["plate"].get(k)
+                          for k in ("min_score", "min_aspect")},
+                "defaults": {
+                    "face": {"min_score": DEFAULT_PROFILE["detect"]["face"]["min_score"]},
+                    "plate": {k: DEFAULT_PROFILE["detect"]["plate"].get(k)
+                              for k in ("min_score", "min_aspect")}},
+                "profile_hash": Config.hash_of(prof),
+                "limits": DETECT_LIMITS}})
         if sub.rstrip("/") == "/profile":
             if self.command == "POST":
                 payload = json.loads(self._body() or b"{}")
@@ -713,6 +777,36 @@ class Handler(BaseHTTPRequestHandler):
                 conn, None, limit=100)})
         if sub.rstrip("/") == "/jobs":
             return self._send(200, {"ok": True, "data": client.jobs(**_job_filters(q))})
+        m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/feedback$", sub)
+        if m:
+            if self.command == "POST":
+                rec = client.feedback_add(m.group("sha"), self._json_body(),
+                                          None, author="dashboard")
+                db.audit(conn, "dashboard", "image.feedback", rec["source_sha"],
+                         self.address_string(), {"id": rec["id"], "kind": rec["kind"]})
+                conn.commit()
+                return self._send(201, {"ok": True, "data": rec})
+            return self._send(200, {"ok": True, "data": client.feedback_list(
+                None, sha=m.group("sha"), **_feedback_filters(self, q, "all"))})
+        if sub.rstrip("/") == "/image-feedback":
+            return self._send(200, {"ok": True, "data": client.feedback_list(
+                None, **_feedback_filters(self, q, "open"))})
+        m = re.match(r"^/image-feedback/(?P<fid>fb_[0-9a-f]{16})/resolve$", sub)
+        if m and self.command == "POST":
+            data = client.feedback_resolve(m.group("fid"),
+                                           self._json_body().get("resolution", ""))
+            db.audit(conn, "dashboard", "image.feedback.resolve", m.group("fid"),
+                     self.address_string())
+            conn.commit()
+            return self._send(200, {"ok": True, "data": data})
+        m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/reprocess$", sub)
+        if m and self.command == "POST":
+            job = client.reprocess(m.group("sha"), None, 60.0)
+            db.audit(conn, "dashboard", "image.reprocess", m.group("sha"),
+                     self.address_string(), {"job": job.get("job_id"),
+                                             "source": job.get("reprocess_source")})
+            conn.commit()
+            return self._send(200, {"ok": True, "data": job})
         m = re.match(r"^/images/(?P<sha>[0-9a-f]{6,64})/regions$", sub)
         if m and self.command == "PUT":
             payload = json.loads(self._body() or b"{}")
@@ -742,6 +836,49 @@ class Handler(BaseHTTPRequestHandler):
                                      self._one(q, "profile"),
                                      thumb=sub.startswith("/thumbs"))
         raise NotFound("endpoint", sub)
+
+
+def _feedback_filters(handler, q, default_status) -> dict:
+    return {"status": handler._one(q, "status", default_status),
+            "kind": handler._one(q, "kind"),
+            "since": handler._one(q, "since"),
+            "limit": int(handler._one(q, "limit", 100) or 100)}
+
+
+# Bounds for dashboard-tunable detection settings. Wide enough to experiment,
+# narrow enough that a typo cannot switch a detector off (min_score 1.0) or
+# blur every rectangle in the frame (min_score 0).
+DETECT_LIMITS = {"min_score": [0.05, 0.99], "min_aspect": [0.0, 5.0]}
+_DETECT_KEYS = {"face": ("min_score",), "plate": ("min_score", "min_aspect")}
+
+
+def _detect_settings(payload) -> dict:
+    """{face:{min_score}, plate:{min_score,min_aspect}} -> {"face.min_score": v}.
+    Validates everything before anything is written."""
+    if not isinstance(payload, dict):
+        raise ValidationError("Body must be an object like "
+                              '{"plate": {"min_score": 0.4}}')
+    out = {}
+    for cls, vals in payload.items():
+        if cls not in _DETECT_KEYS or not isinstance(vals, dict):
+            raise ValidationError(f"Unknown class '{cls}'",
+                                  {"known": sorted(_DETECT_KEYS)})
+        for k, v in vals.items():
+            if k not in _DETECT_KEYS[cls]:
+                raise ValidationError(f"'{k}' is not tunable for {cls}",
+                                      {"known": list(_DETECT_KEYS[cls])})
+            lo, hi = DETECT_LIMITS[k]
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise ValidationError(f"{cls}.{k} must be a number", {"got": v})
+            if not lo <= v <= hi:
+                raise ValidationError(f"{cls}.{k} must be between {lo} and {hi}",
+                                      {"got": v, "min": lo, "max": hi})
+            out[f"{cls}.{k}"] = round(v, 3)
+    if not out:
+        raise ValidationError("Nothing to change")
+    return out
 
 
 def _regions(raw) -> list:

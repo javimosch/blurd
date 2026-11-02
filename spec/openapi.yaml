@@ -19,6 +19,21 @@ components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
   schemas:
+    ImageFeedback:
+      type: object
+      properties:
+        id: { type: string, example: fb_3f9a0c1d2e4b5a69 }
+        source_sha: { type: string }
+        profile_hash: { type: string }
+        kind: { type: string, enum: [missed, false_positive, bad_box, ok, other] }
+        comment: { type: string }
+        box: { type: array, items: { type: integer }, nullable: true }
+        author: { type: string, description: "key:<name>, dashboard, or cli" }
+        status: { type: string, enum: [open, resolved] }
+        resolution: { type: string, nullable: true }
+        created_at: { type: string }
+        resolved_at: { type: string, nullable: true }
+        links: { type: object, properties: { image: { type: string }, blob: { type: string } } }
     Error:
       type: object
       properties:
@@ -300,6 +315,80 @@ paths:
         "401": { description: "missing key, or invalid/expired signature" }
         "404": { description: "never retained, out of scope, or the image was deleted" }
         "410": { description: "resource_expired: retention deadline passed", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /v1/images/{sha}/feedback:
+    post:
+      summary: Record quality feedback on an image
+      description: >
+        A human or agent reporting a missed, false-positive or badly placed
+        redaction. Needs read access to the image (out of scope = 404). Stored
+        under the key's tenant.
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string }, description: "source sha or a unique prefix (6+ hex)" }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [missed, false_positive, bad_box, ok, other] }
+                comment: { type: string, maxLength: 4000 }
+                box: { type: array, items: { type: integer }, description: "[x, y, w, h] in pixels of the redacted image" }
+                profile_hash: { type: string, description: "which artifact it is about; defaults to the latest" }
+      responses:
+        "201": { description: "the stored feedback", content: { application/json: { schema: { $ref: '#/components/schemas/ImageFeedback' } } } }
+        "404": { description: "unknown or out-of-scope image" }
+    get:
+      summary: Feedback on one image
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string } }
+        - { in: query, name: status, schema: { type: string, enum: [open, resolved, all], default: all } }
+      responses:
+        "200": { description: "{items: ImageFeedback[], count, limit}" }
+  /v1/image-feedback:
+    get:
+      summary: Recent feedback across images (the agent read)
+      description: >
+        Newest first, open only by default. An unrestricted key sees every
+        tenant's feedback; a scoped key sees its own.
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [open, resolved, all], default: open } }
+        - { in: query, name: kind, schema: { type: string, enum: [missed, false_positive, bad_box, ok, other] } }
+        - { in: query, name: since, schema: { type: string }, description: "ISO-8601 UTC lower bound on created_at" }
+        - { in: query, name: limit, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200": { description: "{items: ImageFeedback[], count, limit}" }
+  /v1/image-feedback/{id}/resolve:
+    post:
+      summary: Mark feedback handled
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string }, description: "fb_ + 16 hex" }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { resolution: { type: string } } }
+      responses:
+        "200": { description: "the updated feedback", content: { application/json: { schema: { $ref: '#/components/schemas/ImageFeedback' } } } }
+        "404": { description: "unknown, or another tenant's" }
+  /v1/images/{sha}/reprocess:
+    post:
+      summary: Run a known image again with the current profile
+      description: >
+        Re-runs the pipeline with force=1, using a live retained original if
+        there is one, else the URL the image was submitted from. Use it after
+        changing detection thresholds. Labels and codes stay on the sha.
+      parameters:
+        - { in: path, name: sha, required: true, schema: { type: string } }
+        - { in: query, name: wait, schema: { type: number, maximum: 120 } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { profile: { type: object, description: "optional per-request profile overrides" } } }
+      responses:
+        "200": { description: "finished job (adds reprocess_source: original | url)", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        "202": { description: "job still running" }
+        "404": { description: "unknown or out-of-scope image" }
+        "409": { description: "no way back to the source: not url-submitted and no live original" }
   /v1/thumbs/{sha}:
     get:
       summary: Thumbnail for grid views

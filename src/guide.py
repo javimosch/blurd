@@ -60,6 +60,15 @@ COMMANDS
   originals settings [--enable|--disable] [--max-ttl S] [--url-mode M]
                      [--sign-ttl S]     Show/change retention (env-set keys
                                         are locked).
+  image-feedback add <sha> --kind K [--comment T] [--box x,y,w,h]
+                              Report a redaction problem. K: missed,
+                              false_positive, bad_box, ok, other.
+  image-feedback list [--status open|resolved|all] [--kind K] [--sha S]
+                      [--since ISO] [--limit N]   Newest first.
+  image-feedback resolve <id> [--resolution T]    Mark it handled.
+  reprocess <sha> [--wait S]  Run a known image again with the CURRENT
+                              profile (after changing thresholds). Needs a
+                              live retained original or a url-submitted image.
   jobs list [--status S] [--code C]   Recent jobs and queue depth.
   jobs get <job_id> [--wait S]        One job; --wait long-polls.
   list                        Filter stored artifacts.
@@ -127,7 +136,7 @@ PROFILES & TTL
   A profile is the processing configuration: redact mode, detector models and
   thresholds, output format, and optional storage.ttl. The shipped default is:
     {{"detect":{{"face":{{"min_score":0.6,"model":"yunet-2023mar"}},"max_side":1280,
-      "plate":{{"min_score":0.35,"model":"yolov9t-512-plates"}}}},
+      "plate":{{"min_aspect":1.0,"min_score":0.35,"model":"yolov9t-512-plates"}}}},
      "output":{{"format":"jpeg","max_side":0,"quality":90}},
      "redact":{{"expand":0.18,"mode":"pixelate",
       "shape":{{"face":"ellipse","plate":"rect"}},"strength":0.06}},"version":1}}
@@ -155,6 +164,17 @@ ORIGINALS (opt-in source retention)
   short-lived url (exp + sig) that needs no key. Past the deadline reads answer
   410 and the sweep deletes the bytes. A second request only ever extends the
   deadline. keep_original is not part of profile_hash.
+
+DETECTION TUNING, FEEDBACK, REPROCESS
+  detect.face.min_score / detect.plate.min_score: confidence needed to redact.
+  detect.plate.min_aspect: width/height a plate box needs (default 1.0; drops
+  stickers and signs, which are tall). All three are editable in the
+  dashboard settings tab; a change alters profile_hash, so existing images
+  keep their result until reprocessed.
+  POST /v1/images/<sha>/feedback {{kind, comment, box?}} records feedback;
+  GET /v1/image-feedback?status=open is the fast read for agents.
+  POST /v1/images/<sha>/reprocess[?wait=S] re-runs one image (source url or
+  retained original; 409 when neither exists).
 
 OUTPUT CONTRACT
   JSON on stdout by default: {{"version":"1.0","data":...,"timestamp":...}}
@@ -328,6 +348,8 @@ def as_json() -> dict:
             "download": "Fetch redacted image bytes, by sha or --code",
             "delete": "Remove an image and its artifacts",
             "originals": "download | settings for opt-in retained source images",
+            "image-feedback": "add | list | resolve quality feedback on images",
+            "reprocess": "run a known image again with the current profile",
             "stats": "Aggregate counters",
             "serve": "Run API + dashboard (optionally as a daemon)",
             "daemon": "start | stop | status the daemon (cli-daemon-spec)",

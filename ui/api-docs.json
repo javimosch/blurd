@@ -639,6 +639,272 @@
       ]
     },
     {
+      "path": "/v1/images/{sha}/feedback",
+      "method": "POST",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Record quality feedback on an image",
+      "description": "A human or agent reporting a missed, false-positive or badly placed redaction. Needs read access to the image (out of scope = 404). Stored under the key's tenant.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "source sha or a unique prefix (6+ hex)"
+        }
+      ],
+      "body": {
+        "content_types": [
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "kind",
+            "type": "string",
+            "required": true,
+            "description": ""
+          },
+          {
+            "name": "comment",
+            "type": "string",
+            "required": false,
+            "description": ""
+          },
+          {
+            "name": "box",
+            "type": "integer[]",
+            "required": false,
+            "description": "[x, y, w, h] in pixels of the redacted image"
+          },
+          {
+            "name": "profile_hash",
+            "type": "string",
+            "required": false,
+            "description": "which artifact it is about; defaults to the latest"
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "201",
+          "description": "the stored feedback",
+          "schema": "ImageFeedback"
+        },
+        {
+          "status": "404",
+          "description": "unknown or out-of-scope image"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images/{sha}/feedback",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Feedback on one image",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "all"
+          ],
+          "default": "all",
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "{items: ImageFeedback[], count, limit}"
+        }
+      ]
+    },
+    {
+      "path": "/v1/image-feedback",
+      "method": "GET",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Recent feedback across images (the agent read)",
+      "description": "Newest first, open only by default. An unrestricted key sees every tenant's feedback; a scoped key sees its own.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "open",
+            "resolved",
+            "all"
+          ],
+          "default": "open",
+          "description": ""
+        },
+        {
+          "name": "kind",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": [
+            "missed",
+            "false_positive",
+            "bad_box",
+            "ok",
+            "other"
+          ],
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "since",
+          "in": "query",
+          "required": false,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "ISO-8601 UTC lower bound on created_at"
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "type": "integer",
+          "enum": null,
+          "default": 100,
+          "description": ""
+        }
+      ],
+      "body": null,
+      "responses": [
+        {
+          "status": "200",
+          "description": "{items: ImageFeedback[], count, limit}"
+        }
+      ]
+    },
+    {
+      "path": "/v1/image-feedback/{id}/resolve",
+      "method": "POST",
+      "group": "consumer \u2014 fetch redacted output",
+      "summary": "Mark feedback handled",
+      "description": "",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": "fb_ + 16 hex"
+        }
+      ],
+      "body": {
+        "content_types": [
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "resolution",
+            "type": "string",
+            "required": false,
+            "description": ""
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "200",
+          "description": "the updated feedback",
+          "schema": "ImageFeedback"
+        },
+        {
+          "status": "404",
+          "description": "unknown, or another tenant's"
+        }
+      ]
+    },
+    {
+      "path": "/v1/images/{sha}/reprocess",
+      "method": "POST",
+      "group": "producer \u2014 submit images, track jobs",
+      "summary": "Run a known image again with the current profile",
+      "description": "Re-runs the pipeline with force=1, using a live retained original if there is one, else the URL the image was submitted from. Use it after changing detection thresholds. Labels and codes stay on the sha.",
+      "auth": "api key",
+      "params": [
+        {
+          "name": "sha",
+          "in": "path",
+          "required": true,
+          "type": "string",
+          "enum": null,
+          "default": null,
+          "description": ""
+        },
+        {
+          "name": "wait",
+          "in": "query",
+          "required": false,
+          "type": "number",
+          "enum": null,
+          "default": null,
+          "description": ""
+        }
+      ],
+      "body": {
+        "content_types": [
+          "application/json"
+        ],
+        "fields": [
+          {
+            "name": "profile",
+            "type": "object",
+            "required": false,
+            "description": "optional per-request profile overrides"
+          }
+        ]
+      },
+      "responses": [
+        {
+          "status": "200",
+          "description": "finished job (adds reprocess_source: original | url)",
+          "schema": "Job"
+        },
+        {
+          "status": "202",
+          "description": "job still running"
+        },
+        {
+          "status": "404",
+          "description": "unknown or out-of-scope image"
+        },
+        {
+          "status": "409",
+          "description": "no way back to the source: not url-submitted and no live original"
+        }
+      ]
+    },
+    {
       "path": "/v1/thumbs/{sha}",
       "method": "GET",
       "group": "consumer \u2014 fetch redacted output",
@@ -1186,6 +1452,95 @@
     }
   ],
   "schemas": {
+    "ImageFeedback": {
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "source_sha",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "profile_hash",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "comment",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "box",
+          "type": "integer[]",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "author",
+          "type": "string",
+          "required": false,
+          "description": "key:<name>, dashboard, or cli"
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "resolution",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "created_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "resolved_at",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "links",
+          "type": "object",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "links.image",
+          "type": "string",
+          "required": false,
+          "description": ""
+        },
+        {
+          "name": "links.blob",
+          "type": "string",
+          "required": false,
+          "description": ""
+        }
+      ],
+      "example": null
+    },
     "Error": {
       "fields": [
         {

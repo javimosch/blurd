@@ -14,10 +14,12 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from . import auth, db, diskguard, jobs, originals, pipeline, store as _store
+from . import (auth, db, diskguard, image_feedback, jobs, originals, pipeline,
+               store as _store)
 from .scope import Scope
 from .config import Config
-from .errors import BlurdError, Expired, Internal, NotFound, Upstream
+from .errors import (BlurdError, Conflict, Expired, Internal, NotFound,
+                     Upstream)
 
 
 class LocalClient:
@@ -163,6 +165,53 @@ class LocalClient:
         if expired:
             raise Expired("original", sha, {"expired_at": row["expires_at"]})
         return blobs.get(row["blob_path"]), row["mime"]
+
+    def feedback_add(self, sha: str, payload: Dict[str, Any], scope: Scope = None,
+                     author: str = "cli") -> Dict[str, Any]:
+        return image_feedback.add(db.connect(self.cfg.db_file), sha, payload,
+                                  scope, author)
+
+    def feedback_list(self, scope: Scope = None, **filters) -> Dict[str, Any]:
+        return image_feedback.query(db.connect(self.cfg.db_file), scope, **filters)
+
+    def feedback_resolve(self, fid: str, resolution: str = "",
+                         scope: Scope = None) -> Dict[str, Any]:
+        return image_feedback.resolve(db.connect(self.cfg.db_file), fid,
+                                      resolution, scope)
+
+    def reprocess(self, sha: str, overrides=None, wait: float = 0.0,
+                  scope: Scope = None) -> Dict[str, Any]:
+        """Run an already-known image through the pipeline again, with the
+        CURRENT profile (plus overrides). The source was never stored (rule 1),
+        so this needs a way back to the bytes: a live retained original, else
+        the URL it was fetched from. force=1 so an unchanged profile still
+        re-runs; labels and codes stay attached to the sha."""
+        conn = db.connect(self.cfg.db_file)
+        row = db.find_artifact_by_sha_prefix(conn, sha)
+        if not row:
+            raise NotFound("image", sha)
+        full = row["source_sha"]
+        if scope is not None and not scope.is_global \
+                and not scope.allows_sha(conn, full):
+            raise NotFound("image", sha)
+        orig, expired = originals.lookup(self.cfg, conn, full)
+        if orig is not None and not expired and orig["blob_path"]:
+            data = _store.build(self.cfg).get(orig["blob_path"])
+            job = self.submit(data=data, overrides=overrides, force=True,
+                              wait=wait, scope=scope)
+            job["reprocess_source"] = "original"
+            return job
+        img = db.find_image(conn, full)
+        if img is not None and img["source_kind"] == "url" and img["source_ref"]:
+            job = self.submit(url=img["source_ref"], overrides=overrides,
+                              force=True, wait=wait, scope=scope)
+            job["reprocess_source"] = "url"
+            return job
+        raise Conflict(
+            "Cannot reprocess: the source image was not kept and was not "
+            "submitted by URL; resubmit the original bytes with ?force=1, or "
+            "submit with keep_original=SECONDS next time",
+            {"sha": full, "source_kind": img["source_kind"] if img else None})
 
     def stats(self, scope: Scope = None) -> Dict[str, Any]:
         conn = db.connect(self.cfg.db_file)
@@ -363,6 +412,25 @@ class RemoteClient:
 
     def original(self, sha):
         return self._call("GET", f"/v1/originals/{sha}", expect_json=False), None
+
+    def feedback_add(self, sha, payload, author=None):
+        return self._call("POST", f"/v1/images/{sha}/feedback", body=payload)
+
+    def feedback_list(self, **filters):
+        q = {k: v for k, v in filters.items() if v is not None}
+        sha = q.pop("sha", None)
+        if sha:
+            return self._call("GET", f"/v1/images/{sha}/feedback", query=q)
+        return self._call("GET", "/v1/image-feedback", query=q)
+
+    def feedback_resolve(self, fid, resolution=""):
+        return self._call("POST", f"/v1/image-feedback/{fid}/resolve",
+                          body={"resolution": resolution})
+
+    def reprocess(self, sha, overrides=None, wait=0.0):
+        body = {"profile": overrides} if overrides else {}
+        return self._call("POST", f"/v1/images/{sha}/reprocess", body=body,
+                          query={"wait": str(wait)} if wait else None)
 
     def stats(self):
         return self._call("GET", "/v1/stats")

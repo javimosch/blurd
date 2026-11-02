@@ -70,6 +70,7 @@ GROUPS = {
         "/v1/images": ["post"],
         "/v1/jobs": ["get"],
         "/v1/jobs/{job_id}": ["get"],
+        "/v1/images/{sha}/reprocess": ["post"],
     },
     "consumer — fetch redacted output": {
         "/v1/images": ["get"],
@@ -78,6 +79,9 @@ GROUPS = {
         "/v1/thumbs/{sha}": ["get"],
         "/v1/originals/{sha}": ["get"],
         "/v1/images/by-code/{external_id}": ["get"],
+        "/v1/images/{sha}/feedback": ["get", "post"],
+        "/v1/image-feedback": ["get"],
+        "/v1/image-feedback/{id}/resolve": ["post"],
         "/v1/blobs/by-code/{external_id}": ["get"],
         "/v1/thumbs/by-code/{external_id}": ["get"],
     },

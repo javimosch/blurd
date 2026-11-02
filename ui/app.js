@@ -290,7 +290,44 @@ async function openDetail(sha, profile) {
     <button class="ghost" id="dl">download</button>
     <button class="ghost" id="api-det">get via API</button>
     <button class="ghost" id="redact">manual redact</button>
-    <button class="danger" id="del">delete</button>`;
+    <button class="ghost" id="reproc" title="Run this image again with the current detection settings (needs its source URL or a retained original)">reprocess</button>
+    <button class="danger" id="del">delete</button>
+    <h3>feedback</h3>
+    <div id="fb-list" class="kv"></div>
+    <div class="mintbox">
+      <select id="fb-kind">
+        <option value="false_positive">false positive</option>
+        <option value="missed">missed</option>
+        <option value="bad_box">bad box</option>
+        <option value="ok">ok</option>
+        <option value="other">other</option>
+      </select>
+      <input id="fb-comment" placeholder="what is wrong? (e.g. sticker on the bin blurred as a plate)" style="flex:1;min-width:200px">
+      <button id="fb-add">add</button>
+    </div>`;
+  loadFeedback(sha);
+  $("fb-add").onclick = async () => {
+    try {
+      await api(`/images/${sha}/feedback`, { method: "POST", body: JSON.stringify({
+        kind: $("fb-kind").value, comment: $("fb-comment").value, profile_hash: profile }) });
+      $("fb-comment").value = "";
+      loadFeedback(sha);
+    } catch (err) { alert(err.message); }
+  };
+  $("reproc").onclick = async () => {
+    if (!confirm("Reprocess with the current detection settings? Manual regions on this version are not carried over.")) return;
+    $("reproc").disabled = true; $("reproc").textContent = "reprocessing…";
+    try {
+      const job = await api(`/images/${sha}/reprocess`, { method: "POST", body: "{}" });
+      const r = job.result;
+      if (job.status === "done" && r) {
+        closeModal(); load(); loadStats(); openDetail(r.source_sha, r.profile_hash);
+      } else {
+        alert(`job ${job.job_id}: ${job.status}` + (job.error ? " — " + job.error.message : ""));
+      }
+    } catch (err) { alert(err.message); }
+    finally { $("reproc").disabled = false; $("reproc").textContent = "reprocess"; }
+  };
   $("dl").onclick = () => window.open(`/ui-api/blobs/${sha}?profile=${profile}`, "_blank");
   $("api-det").onclick = () => {
     const prof = `?profile=${profile}`;
@@ -312,6 +349,16 @@ async function openDetail(sha, profile) {
     closeModal(); load(); loadStats();
   };
   $("modal").hidden = false;
+}
+
+async function loadFeedback(sha) {
+  try {
+    const f = await api(`/images/${sha}/feedback?status=all`);
+    $("fb-list").innerHTML = f.items.map((x) =>
+      `<span class="pill">${esc(x.kind)}</span><span>${esc(x.comment || "—")}
+       <span style="color:var(--dim)">· ${esc(x.author)} · ${esc(x.created_at)} · ${esc(x.status)}</span></span>`)
+      .join("") || "<span>—</span><span>no feedback yet</span>";
+  } catch (_) { /* feedback is additive; the panel works without it */ }
 }
 
 function closeModal() {
@@ -721,7 +768,9 @@ async function loadSettings() {
         class="s-allow" value="${m}"${allowed.has(m) ? " checked" : ""}> ${m}</label>`)
         .join("") + `</div>
       <div id="s-msg"></div>
+      <div id="s-detect"></div>
       <div id="s-originals"></div>`;
+    loadDetectSettings();
     loadOriginalsSettings();
     $("s-save").onclick = async () => {
       const body = {
@@ -736,6 +785,48 @@ async function loadSettings() {
       try {
         await api("/profile", { method: "POST", body: JSON.stringify(body) });
         $("s-msg").innerHTML = '<div class="notice">saved.</div>';
+      } catch (err) { alert(err.message); }
+    };
+  } catch (err) {
+    el.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
+/* Detection thresholds. A change alters profile_hash: new submissions (and
+   "reprocess") get new artifacts; existing ones keep their result. */
+async function loadDetectSettings() {
+  const el = $("s-detect");
+  try {
+    const d = await api("/profile/detect");
+    const L = d.limits, df = d.defaults;
+    const num = (id, v, lim, step, hint) =>
+      `<input id="${id}" type="number" min="${lim[0]}" max="${lim[1]}" step="${step}" value="${v ?? ""}">` +
+      `<small style="color:var(--dim)">default ${hint}</small>`;
+    el.innerHTML = `
+      <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                 color:var(--dim);margin:26px 0 8px">detection thresholds</h3>
+      <div class="notice">
+        <b>min score</b>: confidence a detection needs to be redacted. Higher =
+        fewer false positives, more misses. <b>plate min aspect</b>: width ÷
+        height a plate box needs (plates are wider than tall; 0 = off), which
+        drops stickers and signs. Changing these changes <code>profile_hash</code>:
+        existing images keep their result until you <b>reprocess</b> them.
+        Current hash <code>${esc(d.profile_hash)}</code>.
+      </div>
+      <div class="mintbox">
+        <div><label>face min score</label>${num("d-fs", d.face.min_score, L.min_score, 0.01, df.face.min_score)}</div>
+        <div><label>plate min score</label>${num("d-ps", d.plate.min_score, L.min_score, 0.01, df.plate.min_score)}</div>
+        <div><label>plate min aspect</label>${num("d-pa", d.plate.min_aspect, L.min_aspect, 0.05, df.plate.min_aspect ?? 0)}</div>
+        <button id="d-save">Save</button>
+      </div>
+      <div id="d-msg"></div>`;
+    $("d-save").onclick = async () => {
+      const body = { face: { min_score: parseFloat($("d-fs").value) },
+                     plate: { min_score: parseFloat($("d-ps").value),
+                              min_aspect: parseFloat($("d-pa").value || "0") } };
+      try {
+        const r = await api("/profile/detect", { method: "POST", body: JSON.stringify(body) });
+        $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code></div>`;
       } catch (err) { alert(err.message); }
     };
   } catch (err) {

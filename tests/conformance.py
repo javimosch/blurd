@@ -510,6 +510,15 @@ def main():
                            body=b'{"regions":[]}')
         check("regions PUT without CSRF is refused", s in (401, 403),
               f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/profile/detect",
+                           headers={"Authorization": basic})
+        dd = json.loads(b or b"{}").get("data") or {}
+        check("detection thresholds are readable from the dashboard",
+              s == 200 and "min_score" in dd.get("plate", {})
+              and "min_aspect" in dd.get("plate", {}), f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/profile/detect", method="POST",
+                           headers=authed, body=b'{"face":{"min_score":1.5}}')
+        check("an out-of-range threshold is refused", s == 422, f"got {s}")
 
     print("\n-- concurrent dedup race")
     # Two workers processing the same (source_sha, profile_hash) must both end
@@ -836,6 +845,42 @@ def main():
               len(json.loads(b).get("error", {}).get("details", {})
                   .get("tenants", [])) >= 2)
 
+    print("\n-- image feedback and reprocess")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/feedback", "POST", a.api_key,
+                   json.dumps({"kind": "false_positive", "comment": "conformance",
+                               "box": [1, 2, 3, 4]}).encode(), "application/json")
+    fb = json.loads(b or b"{}").get("data") or {}
+    check("feedback on an image is 201 with an fb_ id",
+          s == 201 and str(fb.get("id", "")).startswith("fb_")
+          and fb.get("status") == "open" and fb.get("box") == [1, 2, 3, 4],
+          f"got {s} {b[:120]}")
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/feedback", "POST", a.api_key,
+                   b'{"kind":"nonsense"}', "application/json")
+    check("an unknown feedback kind is 422", s == 422, f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/images/{'0' * 64}/feedback", "POST", a.api_key,
+                   b'{"kind":"ok"}', "application/json")
+    check("feedback on an unknown image is 404", s == 404, f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/image-feedback?kind=false_positive", key=a.api_key)
+    ids = [x["id"] for x in (json.loads(b or b"{}").get("data") or {}).get("items", [])]
+    check("the open-feedback listing returns it", fb.get("id") in ids, str(ids[:3]))
+    if a.scoped_key_b:
+        s, b, _ = http(f"{a.url}/v1/image-feedback", key=a.scoped_key_b)
+        ids_b = [x["id"] for x in (json.loads(b or b"{}").get("data") or {}).get("items", [])]
+        check("a scoped key never lists another tenant's feedback",
+              fb.get("id") not in ids_b)
+    s, b, _ = http(f"{a.url}/v1/image-feedback/{fb.get('id')}/resolve", "POST",
+                   a.api_key, b'{"resolution":"threshold raised"}', "application/json")
+    rv = json.loads(b or b"{}").get("data") or {}
+    check("resolving feedback marks it resolved",
+          s == 200 and rv.get("status") == "resolved", f"got {s}")
+    s, b, _ = http(f"{a.url}/v1/image-feedback", key=a.api_key)
+    ids = [x["id"] for x in (json.loads(b or b"{}").get("data") or {}).get("items", [])]
+    check("resolved feedback leaves the open listing", fb.get("id") not in ids)
+    s, b, _ = http(f"{a.url}/v1/images/{sha}/reprocess", "POST", a.api_key,
+                   b"{}", "application/json")
+    check("reprocess of an uploaded image with no original is 409", s == 409,
+          f"got {s}")
+
     # Last on purpose: it deletes an image, and earlier checks pick "the
     # newest job" and expect its result to still exist.
     print("\n-- originals: opt-in source retention with a TTL")
@@ -892,6 +937,14 @@ def main():
             s, _, _ = http(f"{a.url}/v1/originals/{ksha}", key=a.scoped_key_b)
             check("an out-of-scope key gets 404 for the original", s == 404,
                   f"got {s}")
+        s, b, _ = http(f"{a.url}/v1/images/{ksha}/reprocess?wait=60", "POST",
+                       a.api_key, b"{}", "application/json")
+        rj = json.loads(b or b"{}").get("data") or {}
+        check("reprocess re-runs from a live retained original",
+              s == 200 and rj.get("status") == "done"
+              and rj.get("reprocess_source") == "original"
+              and (rj.get("result") or {}).get("source_sha") == ksha,
+              f"got {s}/{rj.get('status')}/{rj.get('reprocess_source')}")
         s, body = submit_keep(kept, 60)
         o2 = ((body.get("data") or {}).get("result") or {}).get("original") or {}
         check("a shorter second request never cuts the deadline",

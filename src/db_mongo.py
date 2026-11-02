@@ -113,6 +113,10 @@ def init(conn) -> None:
     db["instances"].create_index([("last_seen", pymongo.DESCENDING)])
     db["audit"].create_index([("seq", pymongo.DESCENDING)])
     db["originals"].create_index([("expires_at", pymongo.ASCENDING)])
+    db["image_feedback"].create_index([("source_sha", pymongo.ASCENDING),
+                                       ("created_at", pymongo.ASCENDING)])
+    db["image_feedback"].create_index([("status", pymongo.ASCENDING),
+                                       ("created_at", pymongo.DESCENDING)])
 
 
 def migrate(conn) -> None:
@@ -348,6 +352,7 @@ def delete_image(conn, sha: str) -> None:
     db["labels"].delete_many({"source_sha": sha})
     db["codes"].delete_many({"source_sha": sha})
     db["originals"].delete_one({"_id": sha})
+    db["image_feedback"].delete_many({"source_sha": sha})
     db["images"].delete_one({"_id": sha})
 
 
@@ -1180,3 +1185,39 @@ def setting_put(conn, key: str, value: Any) -> None:
     conn.db["settings"].update_one(
         {"_id": key}, {"$set": {"value": value, "updated_at": now()}},
         upsert=True)
+
+
+# --- image feedback -------------------------------------------------------------
+
+def feedback_insert(conn, rec: Dict[str, Any]) -> None:
+    doc = {k: v for k, v in rec.items() if k != "id"}
+    doc.setdefault("status", "open")
+    doc.setdefault("comment", "")
+    doc.update({"_id": rec["id"], "resolution": None, "resolved_at": None})
+    conn.db["image_feedback"].insert_one(doc)
+
+
+def feedback_get(conn, fid: str):
+    return _row(conn.db["image_feedback"].find_one({"_id": fid}), "id")
+
+
+def feedback_query(conn, tenant: Optional[str] = None, sha: Optional[str] = None,
+                   status: Optional[str] = None, kind: Optional[str] = None,
+                   since: Optional[str] = None, limit: int = 100) -> List[dict]:
+    """See db_sql.feedback_query."""
+    q: Dict[str, Any] = {}
+    for col, val in (("tenant", tenant), ("source_sha", sha),
+                     ("status", status), ("kind", kind)):
+        if val is not None:
+            q[col] = val
+    if since:
+        q["created_at"] = {"$gte": since}
+    cur = conn.db["image_feedback"].find(q).sort(
+        [("created_at", -1), ("_id", -1)]).limit(int(limit))
+    return [_row(d, "id") for d in cur]
+
+
+def feedback_resolve(conn, fid: str, resolution: str) -> None:
+    conn.db["image_feedback"].update_one(
+        {"_id": fid}, {"$set": {"status": "resolved", "resolution": resolution,
+                                "resolved_at": now()}})

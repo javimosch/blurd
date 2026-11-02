@@ -95,6 +95,28 @@ def build_parser() -> argparse.ArgumentParser:
     ost.add_argument("--url-mode", choices=["authenticated", "signed"])
     ost.add_argument("--sign-ttl", type=int, metavar="SECONDS")
 
+    fbp = sub.add_parser("image-feedback",
+                         help="Quality feedback on redacted images (for review "
+                              "and for developer agents)")
+    fbs = fbp.add_subparsers(dest="fb_cmd")
+    fa = fbs.add_parser("add", help="Report a problem on an image")
+    fa.add_argument("sha")
+    fa.add_argument("--kind", required=True,
+                    choices=["missed", "false_positive", "bad_box", "ok", "other"])
+    fa.add_argument("--comment", default="")
+    fa.add_argument("--box", help="x,y,w,h in pixels of the redacted image")
+    fl = fbs.add_parser("list", help="Newest first; open only by default")
+    fl.add_argument("--sha"); fl.add_argument("--kind")
+    fl.add_argument("--status", default="open", choices=["open", "resolved", "all"])
+    fl.add_argument("--since", help="ISO-8601 UTC lower bound")
+    fl.add_argument("--limit", type=int, default=100)
+    fr = fbs.add_parser("resolve", help="Mark feedback handled")
+    fr.add_argument("id"); fr.add_argument("--resolution", default="")
+
+    rp = sub.add_parser("reprocess", help="Run a known image again with the "
+                        "current profile (needs its source URL or a retained original)")
+    rp.add_argument("sha"); rp.add_argument("--wait", type=float, default=60.0)
+
     jb = sub.add_parser("jobs", help="Inspect async jobs")
     js = jb.add_subparsers(dest="jobs_cmd")
     jl = js.add_parser("list")
@@ -555,6 +577,30 @@ def run(args, out: Out) -> int:
         Path(args.out).write_bytes(data)
         out.emit({"source_sha": args.sha, "bytes": len(data),
                   "written_to": str(Path(args.out).resolve())})
+        return EXIT_SUCCESS
+
+    if cmd == "image-feedback":
+        sub_cmd = getattr(args, "fb_cmd", None)
+        if sub_cmd == "add":
+            payload = {"kind": args.kind, "comment": args.comment}
+            if args.box:
+                try:
+                    payload["box"] = [int(v) for v in args.box.split(",")]
+                except ValueError:
+                    raise InvalidArgument("--box must be x,y,w,h integers")
+            out.emit(cl.feedback_add(args.sha, payload))
+        elif sub_cmd == "list":
+            out.emit(cl.feedback_list(sha=args.sha, kind=args.kind,
+                                      status=args.status, since=args.since,
+                                      limit=args.limit))
+        elif sub_cmd == "resolve":
+            out.emit(cl.feedback_resolve(args.id, args.resolution))
+        else:
+            raise InvalidArgument("Use: blurd image-feedback add|list|resolve")
+        return EXIT_SUCCESS
+
+    if cmd == "reprocess":
+        out.emit(cl.reprocess(args.sha, None, args.wait))
         return EXIT_SUCCESS
 
     if cmd == "delete":

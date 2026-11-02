@@ -20,7 +20,12 @@ DEFAULT_PROFILE: Dict[str, Any] = {
     "version": 1,
     "detect": {
         "face": {"model": "yunet-2023mar", "min_score": 0.6},
-        "plate": {"model": "yolov9t-512-plates", "min_score": 0.35},
+        # min_aspect: plates are wider than tall (even a square moto plate
+        # seen at an angle); on the isoprod set every sampled box with
+        # w/h < 1 was a sticker, sign or wall. Adding it changed profile_hash
+        # once (0.22.0) -- knowingly, see AGENTS.md rule 3.
+        "plate": {"model": "yolov9t-512-plates", "min_score": 0.35,
+                  "min_aspect": 1.0},
         "max_side": 1280,          # long edge used for detection, boxes scale back
     },
     "redact": {
@@ -191,6 +196,9 @@ class Config:
         for cls in ("face", "plate"):
             if cls in prof.get("detect", {}):
                 prof["detect"][cls]["min_score"] = round(float(prof["detect"][cls]["min_score"]), 3)
+                if prof["detect"][cls].get("min_aspect") is not None:
+                    prof["detect"][cls]["min_aspect"] = round(
+                        float(prof["detect"][cls]["min_aspect"]), 3)
         prof["redact"]["strength"] = round(float(prof["redact"]["strength"]), 3)
         prof["redact"]["expand"] = round(float(prof["redact"]["expand"]), 3)
         # Whitelist: every mode the profile would use (default + per-class)

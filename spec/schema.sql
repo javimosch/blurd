@@ -247,6 +247,26 @@ CREATE TABLE IF NOT EXISTS originals (
 );
 CREATE INDEX IF NOT EXISTS idx_originals_expires ON originals(expires_at);
 
+-- Per-image quality feedback (added in 0.22.0): a human or agent reporting a
+-- missed / false-positive / badly placed redaction. Read back by developer
+-- agents via GET /v1/image-feedback. Tenant-stamped like tags (rule 12).
+CREATE TABLE IF NOT EXISTS image_feedback (
+  id           TEXT PRIMARY KEY,
+  source_sha   TEXT NOT NULL,
+  tenant       TEXT NOT NULL DEFAULT '',
+  profile_hash TEXT,
+  kind         TEXT NOT NULL,
+  comment      TEXT NOT NULL DEFAULT '',
+  box_json     TEXT,
+  author       TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'open',
+  resolution   TEXT,
+  created_at   TEXT NOT NULL,
+  resolved_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_image_feedback_sha ON image_feedback(source_sha, created_at);
+CREATE INDEX IF NOT EXISTS idx_image_feedback_status ON image_feedback(status, created_at, id);
+
 -- Runtime settings edited from the dashboard (added in 0.21.0). In the
 -- database rather than config.json so every replica sees a change at once
 -- and none needs a restart; env still wins over a row here.

@@ -96,7 +96,12 @@ def run_detectors(cfg: Config, img: np.ndarray, profile: Dict[str, Any],
         det = detect.build(cfg.models_dir, spec["model"], spec["min_score"])
         found = det.detect(work)
         timer.mark(f"detect_{cls}_ms", t0)
+        # Shape sanity: a plate is wider than tall, even a square moto
+        # plate seen at an angle. A tall box is a sticker or a sign.
+        min_aspect = float(spec.get("min_aspect") or 0)
         for d in found:
+            if min_aspect and d.h and d.w / d.h < min_aspect:
+                continue
             if scale != 1.0:
                 d = detect.Detection(d.cls, int(d.x / scale), int(d.y / scale),
                                      int(d.w / scale), int(d.h / scale),

@@ -670,6 +670,7 @@ def delete_image(conn, sha: str) -> None:
     conn.execute("DELETE FROM images WHERE source_sha=?", (sha,))   # cascades
     # No FK on originals (written before the image row), so not cascaded.
     conn.execute("DELETE FROM originals WHERE source_sha=?", (sha,))
+    conn.execute("DELETE FROM image_feedback WHERE source_sha=?", (sha,))
     conn.commit()
 
 
@@ -1240,4 +1241,51 @@ def setting_put(conn, key: str, value: Any) -> None:
            ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json,
              updated_at = excluded.updated_at""",
         (key, json.dumps(value), now()))
+    conn.commit()
+
+
+# --- image feedback -------------------------------------------------------------
+
+_FB_COLS = ("id, source_sha, tenant, profile_hash, kind, comment, box_json, "
+            "author, status, resolution, created_at, resolved_at")
+
+
+def feedback_insert(conn, rec: Dict[str, Any]) -> None:
+    conn.execute(
+        f"INSERT INTO image_feedback ({_FB_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (rec["id"], rec["source_sha"], rec["tenant"], rec.get("profile_hash"),
+         rec["kind"], rec.get("comment") or "", rec.get("box_json"),
+         rec["author"], rec.get("status", "open"), None, rec["created_at"], None))
+    conn.commit()
+
+
+def feedback_get(conn, fid: str):
+    return conn.execute(f"SELECT {_FB_COLS} FROM image_feedback WHERE id=?",
+                        (fid,)).fetchone()
+
+
+def feedback_query(conn, tenant: Optional[str] = None, sha: Optional[str] = None,
+                   status: Optional[str] = None, kind: Optional[str] = None,
+                   since: Optional[str] = None, limit: int = 100) -> List[dict]:
+    """Newest first. `tenant` None = unrestricted (the operator view)."""
+    where, args = [], []
+    for col, val in (("tenant", tenant), ("source_sha", sha),
+                     ("status", status), ("kind", kind)):
+        if val is not None:
+            where.append(f"{col}=?")
+            args.append(val)
+    if since:
+        where.append("created_at>=?")
+        args.append(since)
+    sql = f"SELECT {_FB_COLS} FROM image_feedback"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    args.append(int(limit))
+    return conn.execute(sql, tuple(args)).fetchall()
+
+
+def feedback_resolve(conn, fid: str, resolution: str) -> None:
+    conn.execute("UPDATE image_feedback SET status='resolved', resolution=?, "
+                 "resolved_at=? WHERE id=?", (resolution, now(), fid))
     conn.commit()

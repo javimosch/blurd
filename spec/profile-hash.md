@@ -13,7 +13,7 @@ redaction made by an older model.
 
 1. Take the effective profile: config defaults deep-merged with any
    per-request overrides.
-2. Round every float to 3 decimals (`min_score`, `strength`, `expand`), so
+2. Round every float to 3 decimals (`min_score`, `min_aspect`, `strength`, `expand`), so
    float formatting differences between languages can never split the cache.
 3. Serialise to **canonical JSON**:
    - object keys sorted by unicode code point
@@ -26,10 +26,14 @@ redaction made by an older model.
 Profile (the shipped default):
 
 ```json
-{"detect":{"face":{"min_score":0.6,"model":"yunet-2023mar"},"max_side":1280,"plate":{"min_score":0.35,"model":"yolov9t-512-plates"}},"output":{"format":"jpeg","max_side":0,"quality":90},"redact":{"expand":0.18,"mode":"pixelate","shape":{"face":"ellipse","plate":"rect"},"strength":0.06},"version":1}
+{"detect":{"face":{"min_score":0.6,"model":"yunet-2023mar"},"max_side":1280,"plate":{"min_aspect":1.0,"min_score":0.35,"model":"yolov9t-512-plates"}},"output":{"format":"jpeg","max_side":0,"quality":90},"redact":{"expand":0.18,"mode":"pixelate","shape":{"face":"ellipse","plate":"rect"},"strength":0.06},"version":1}
 ```
 
-    profile_hash = 1e994f69934887ce
+    profile_hash = f62116fe7b854e72
+
+Note `"min_aspect":1.0`: floats follow Python `repr()`, so an integral float
+keeps its `.0`. A port whose JSON encoder writes `1` gets a different hash.
+Before 0.22.0 (no `min_aspect`) the default hashed to `1e994f69934887ce`.
 
 `storage.ttl` is optional and absent from the default: a blob that expires is
 a *different processing intent*, so it gets its own profile_hash rather than
