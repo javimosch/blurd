@@ -943,8 +943,8 @@
           "description": "no or unknown source, or the bytes are a different image"
         },
         {
-          "status": "502",
-          "description": "the URL could not be fetched"
+          "status": "504",
+          "description": "the URL could not be fetched (upstream_error, code 105)"
         }
       ]
     },

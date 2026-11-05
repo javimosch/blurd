@@ -397,7 +397,7 @@ paths:
         "404": { description: "unknown or out-of-scope image" }
         "409": { description: "the chosen source does not exist for this image (no retained original / not submitted by URL)" }
         "422": { description: "no or unknown source, or the bytes are a different image" }
-        "502": { description: "the URL could not be fetched" }
+        "504": { description: "the URL could not be fetched (upstream_error, code 105)" }
   /v1/thumbs/{sha}:
     get:
       summary: Thumbnail for grid views
