@@ -139,6 +139,45 @@ dimensions: how much, and for how long.
 (the figure the cap compares) and `disk` on the unrestricted view; scoped keys
 still cannot read instance size.
 
+## Rotation: `storage.evict = oldest` (0.23.0)
+
+A cap that refuses (507) protects the disk but stops the service. With
+`storage.evict=oldest` (env `BLURD_STORAGE_EVICT`, default `off`) and a
+non-zero `max_bytes`, crossing `evict_high_pct` (default 90) of the cap evicts
+the **oldest** live objects -- with or without a TTL -- until usage is under
+`evict_low_pct` (default 75). It runs inline before a write (bounded to 1000
+objects; the reaper finishes the rest) and in the 30 s reaper sweep.
+
+Order, cheapest loss first:
+
+1. objects already past their TTL (blobs and retained originals);
+2. retained originals, then redacted blobs, of images with **no open feedback**,
+   oldest first;
+3. the same for images **with open feedback** -- a review queue is not exempt
+   (it must not be able to pin the disk), it just goes last.
+
+An evicted artifact is the same tombstone as a TTL expiry: the row, detections,
+codes and thumbnail stay; `blob_path` is cleared, `evicted_at` is stamped and
+`expires_at` pulled to now, so every read answers **410 `resource_expired`**
+with `details.reason = "evicted"` (vs `"ttl"`) and a resubmit regenerates it.
+One `storage.evict` audit row per pass records the counts.
+
+**What is not rotated: the database.** Rows grow with traffic (a ~15 KB
+thumbnail per image lives there). `max_disk_pct` bounds that with a refusal;
+growing the disk or pruning old rows is an operator decision.
+
+**The bucket's own limit.** blurd's meter cannot see a bucket quota -- the S3
+protocol has no quota or usage call. Set `max_bytes` *below* the quota. As a
+safety net, a PUT the store refuses for space (MinIO/Ceph quota error codes,
+`507`, or `ENOSPC` locally) is treated as full: rotate 10 %, 25 %, 50 % of live
+usage, retrying after each; without rotation it is a 507 at once. Note MinIO
+enforces quotas from its usage scanner, which lags minutes behind writes.
+
+`blurd storage scan` lists the bucket (ListObjectsV2) or walks the disk and
+compares real bytes with the accounting (`drift_bytes`). `blurd storage rotate`
+runs one pass now. `/v1/stats` reports `storage_rotation {enabled, high_bytes,
+low_bytes}` next to `storage_max_bytes` / `storage_used_bytes`.
+
 ## Opt-in disk guard: `storage.max_disk_pct`
 
 `max_bytes` meters what blurd believes it stores. It cannot see the database,

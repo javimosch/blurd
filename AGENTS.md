@@ -52,6 +52,9 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Opt-in original retention + runtime settings | `src/originals.py`, `spec/originals.md` |
 | Opt-in disk guard (statvfs threshold) | `src/diskguard.py`, `spec/storage.md` |
 | Image feedback, detection tuning, reprocess | `src/image_feedback.py`, `spec/image-feedback.md` |
+| Storage rotation (oldest-first eviction under the cap) | `src/rotation.py`, `spec/storage.md`, `tests/rotation_local.py` |
+| Per-scope ingest policies (max input size, forced optimize) | `src/policy.py`, `blurd scope-policy` |
+| Dashboard-editable instance defaults (shared DB, env locks) | `src/runtime.py` |
 | Metadata dispatch (the facade, no queries) | `src/db.py` |
 | Metadata backends: SQL | `src/db_sql.py`, `src/dialect.py`, `spec/postgres.md` |
 | Metadata backends: documents | `src/db_mongo.py`, `spec/mongo.md` |
@@ -100,9 +103,12 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
    "simplify" it into the `metadata` table.
 9. **Dashboard credentials must never authenticate `/v1`, and an API key must
    never open the dashboard.** A conformance check asserts both directions.
-10. **Key creation from the dashboard stays opt-in behind a second secret.**
-    Revocation is fail-safe and always available; creation turns one shared
-    browser password into permanent machine access that survives changing it.
+10. **Key creation from the dashboard is ON by default since 0.23 (owner's
+    decision), with an OPTIONAL second secret.** A minted key outlives the
+    dashboard password, so `BLURD_DASHBOARD_KEY_SECRET` (when set) is required
+    as `X-Blurd-Admin-Secret` for every mint, and
+    `BLURD_DASHBOARD_ALLOW_KEY_CREATION=false` turns minting off. Revocation is
+    always available; an active key can never be removed, only revoked first.
 11. **Every `/ui-api` mutation needs the CSRF token.** Do not rely on the CORS
     preflight that a `DELETE` or a JSON POST happens to trigger — that is an
     accident of content type, not a defence.
@@ -295,3 +301,23 @@ never leaves that process.
     paths. Core code must never import plugin internals, and the feature
     set must stay complete without it — the seam exists so plugin work does
     not fork the dashboard or the dispatch chain.
+
+50. **Rotation evicts bytes, never rows.** `storage.evict=oldest` deletes the
+    oldest blobs/originals (images with open feedback last) and tombstones the
+    row exactly like a TTL expiry, plus `evicted_at` so the 410 can say
+    `reason: evicted`. The database is deliberately not rotated -- the disk
+    guard refuses instead, and pruning rows is the operator's decision. Do not
+    "complete" rotation by deleting records: codes would turn from 410 into 404.
+51. **Scope policies are a floor, not a default.** `policy.tighten` takes the
+    strictest of request, instance and policy per field; a request can never
+    loosen its scope's `optimize` or exceed `max_input_bytes`. Policies live in
+    the shared `settings` row `scope_policies`, keyed by tenant -- not on a key
+    (keys sharing a scope share data) and not on request tags (caller-chosen).
+52. **Dashboard settings live in the shared database, never in config.json.**
+    `cfg.set()` writes the pod's own file: on Kubernetes that is one replica,
+    until restart. Anything the dashboard edits goes through `runtime.put()`
+    (one `settings` row, validated per path, re-read every 3 s by each
+    replica) and is layered `DEFAULTS < config.json < runtime < env`. An env
+    var that sets a path locks it in the UI. Add a dashboard setting by adding
+    its path + validator to `runtime.RUNTIME` -- never infrastructure
+    (backends, credentials, sizing).

@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from . import db, diskguard, originals, pipeline, resources, store
+from . import db, diskguard, originals, pipeline, policy, resources, rotation, store
 from .scope import Scope
 from .canonical import canonical_json
 from .config import Config
@@ -101,6 +101,7 @@ class JobQueue:
                 self.reap()
                 self.prune_expired()
                 self.prune_originals()
+                self.rotate()
                 self.prune_audit()
                 cb = getattr(self, "on_sweep", None)
                 if cb:
@@ -153,6 +154,12 @@ class JobQueue:
         # No conn.close(): connect() hands out the thread's cached connection;
         # closing it poisons every later query on this thread.
         return len(rows)
+
+    def rotate(self):
+        """Rotation sweep (storage.evict=oldest): above the high mark, evict
+        oldest-first down to the low mark. No-op when rotation is off."""
+        conn = db.connect(self.cfg.db_file)
+        return rotation.sweep(self.cfg, conn, store.build(self.cfg))
 
     def prune_originals(self) -> int:
         """Delete retained source images past their deadline. Unlike the
@@ -226,9 +233,15 @@ class JobQueue:
         # a scoped app can never create an image it cannot subsequently read.
         tags, metadata = scope.stamp(tags, metadata)
         tenant = scope.tenant
+        # The scope's policy is part of the request from here on: its optimize
+        # floor is folded into the overrides (so profile_hash reflects it) and
+        # its size limit is checked before anything is queued.
+        pol = policy.for_tenant(conn, tenant)
+        overrides = policy.tighten(self.cfg, pol, overrides)
         profile = self.cfg.resolve_profile(overrides)
         phash = Config.hash_of(profile)
-        keep = originals.requested_ttl(self.cfg, conn, keep_original)
+        keep = policy.clamp_keep(
+            pol, originals.requested_ttl(self.cfg, conn, keep_original))
 
         # Fast path: a known external_id under the default policy short-circuits
         # before any fetch or decode. For a re-ingesting producer this is the
@@ -267,6 +280,7 @@ class JobQueue:
                 raise ValidationError(
                     f"Image too large: {len(data)} bytes > limit {max_bytes}",
                     {"max_bytes": max_bytes})
+            policy.check_size(pol, len(data), tenant)
             # Magic bytes, not the Content-Type header. A body that sniffs to
             # octet-stream can never decode, so it fails now with a 422 instead
             # of queueing and dying in the worker where only a poll reveals it.

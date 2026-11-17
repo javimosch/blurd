@@ -148,7 +148,7 @@ class LocalClient:
         # The record stays readable after TTL -- only the bytes are gone.
         rec = self.get(sha, profile, scope)
         if rec.get("expires_at") and rec["expires_at"] <= db.now():
-            raise Expired("image", sha, {"expired_at": rec["expires_at"]})
+            raise Expired("image", sha, db.expiry_detail(rec))
         return _store.build(self.cfg).get(rec["blob"]["key"])
 
     def original(self, sha: str, scope: Scope = None) -> tuple:
@@ -256,6 +256,10 @@ class LocalClient:
             s["storage_max_bytes"] = int(self.cfg.get("storage.max_bytes") or 0)
             s["storage_used_bytes"] = pipeline._live_bytes(conn)
             s["disk"] = diskguard.usage(self.cfg)
+            from . import rotation as _rot
+            cap, high, low = _rot.marks(self.cfg)
+            s["storage_rotation"] = {"enabled": _rot.enabled(self.cfg),
+                                     "high_bytes": high, "low_bytes": low}
         s["profile_hash"] = Config.hash_of(self.cfg.resolve_profile())
         return s
 

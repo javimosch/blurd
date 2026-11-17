@@ -172,8 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Allow or forbid minting API keys from the dashboard")
     dks = dk.add_subparsers(dest="dashboard_keys_cmd")
     dke = dks.add_parser("enable")
-    dke.add_argument("--secret", required=True,
-                     help="Second secret, required at mint time. Not the dashboard password.")
+    dke.add_argument("--secret",
+                     help="Optional second secret, then required at mint time. "
+                          "Not the dashboard password. Omit to keep the current one.")
     dks.add_parser("disable")
     dks.add_parser("status")
 
@@ -200,6 +201,31 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("storage", help="Inspect or verify the blob backend")
     sts = st.add_subparsers(dest="storage_cmd")
     sts.add_parser("show"); sts.add_parser("check")
+    sts.add_parser("scan", help="Real usage in the store vs blurd's accounting "
+                                "(lists the bucket; an operator check)")
+    sts.add_parser("rotate", help="Run one rotation pass now "
+                                  "(storage.evict=oldest)")
+
+    sp = sub.add_parser("scope-policy",
+                        help="Per-scope ingest rules: max input size, forced optimization")
+    sps = sp.add_subparsers(dest="sp_cmd")
+    sps.add_parser("list")
+    for name in ("set", "unset"):
+        x = sps.add_parser(name)
+        x.add_argument("--tenant", help="Tenant id as shown by `keys list` "
+                       "('global' = unscoped keys)")
+        x.add_argument("--scope-tag", action="append", default=[], metavar="TAG",
+                       help="Name the scope by its tags instead (as in keys add)")
+        x.add_argument("--scope-meta", action="append", default=[], metavar="K=V")
+        if name == "set":
+            x.add_argument("--max-input-bytes", type=int)
+            x.add_argument("--optimize-above", type=int, metavar="BYTES")
+            x.add_argument("--optimize-max-side", type=int)
+            x.add_argument("--optimize-quality", type=int)
+            x.add_argument("--ttl", type=int, metavar="SECONDS",
+                           help="Default (and maximum) blob retention for the scope")
+            x.add_argument("--max-keep-original", type=int, metavar="SECONDS")
+            x.add_argument("--label")
 
     mb = sub.add_parser("migrate-blobs",
                         help="Copy blobs between backends (resumable, batched)")
@@ -307,23 +333,26 @@ def run(args, out: Out) -> int:
         return EXIT_SUCCESS
     if cmd == "dashboard-keys":
         if args.dashboard_keys_cmd == "enable":
-            if args.secret == cfg.get("dashboard_password"):
-                raise InvalidArgument(
-                    "The admin secret must differ from the dashboard password",
-                    suggestions=["The point of the second secret is that one "
-                                 "compromised browser login is not enough to "
-                                 "mint a key that outlives it"])
-            # Length is a strength question, and strength is the operator's
-            # call -- warn and proceed. Equality with the dashboard password is
-            # not: such a secret adds exactly nothing, so that stays an error.
-            weak = len(args.secret) < 12
-            if weak:
-                out.log(f"warning: the admin secret is {len(args.secret)} characters. "
-                        "Fine for a local POC; use 12+ anywhere it is reachable.")
+            weak = False
+            if args.secret is not None:
+                if args.secret == cfg.get("dashboard_password"):
+                    raise InvalidArgument(
+                        "The admin secret must differ from the dashboard password",
+                        suggestions=["The point of the second secret is that one "
+                                     "compromised browser login is not enough to "
+                                     "mint a key that outlives it"])
+                # Length is a strength question, and strength is the operator's
+                # call -- warn and proceed. Equality with the dashboard password
+                # is not: such a secret adds exactly nothing.
+                weak = len(args.secret) < 12
+                if weak:
+                    out.log(f"warning: the admin secret is {len(args.secret)} characters. "
+                            "Fine for a local POC; use 12+ anywhere it is reachable.")
+                cfg.set("dashboard_key_secret", args.secret)
             cfg.set("dashboard_allow_key_creation", True)
-            cfg.set("dashboard_key_secret", args.secret)
             out.emit({"dashboard_key_creation": "enabled",
-                      "requires_header": "X-Blurd-Admin-Secret",
+                      "requires_header": ("X-Blurd-Admin-Secret"
+                                          if cfg.get("dashboard_key_secret") else None),
                       "weak_secret": weak,
                       "note": "Revocation was already available and stays available."})
         elif args.dashboard_keys_cmd == "disable":
@@ -354,9 +383,77 @@ def run(args, out: Out) -> int:
         out.emit(res)
         return EXIT_SUCCESS
 
+    if cmd == "scope-policy":
+        from . import db as _db, policy as _pol, auth as _auth
+        from .scope import from_cli
+        conn = _db.connect(cfg.db_file)
+        if args.sp_cmd in ("set", "unset"):
+            if args.tenant:
+                tenant = args.tenant
+            elif args.scope_tag or args.scope_meta:
+                tenant = from_cli(args.scope_tag, args.scope_meta).tenant
+            else:
+                raise InvalidArgument("Name the scope: --tenant T, or --scope-tag/--scope-meta",
+                                      {})
+            if args.sp_cmd == "unset":
+                _pol.put(conn, tenant, None)
+            else:
+                raw = {"max_input_bytes": args.max_input_bytes, "label": args.label,
+                       "ttl": args.ttl, "max_keep_original": args.max_keep_original}
+                if args.optimize_above:
+                    raw["optimize"] = {"above_bytes": args.optimize_above,
+                                       "max_side": args.optimize_max_side,
+                                       "quality": args.optimize_quality}
+                pol = _pol.validate(raw)
+                if not any(pol.get(k) for k in _pol.RULES):
+                    raise InvalidArgument("Nothing to set: pass --max-input-bytes, "
+                                          "--optimize-above, --ttl or "
+                                          "--max-keep-original", {})
+                _pol.put(conn, tenant, pol)
+            _db.audit(conn, "cli", f"scope_policy.{args.sp_cmd}", tenant)
+            conn.commit()
+        pols = _pol.all_policies(conn)
+        keys = {}
+        for k in _auth.listing(conn):
+            if not k["revoked"]:
+                keys.setdefault(k["tenant"], []).append(k["name"])
+        res = {"policies": [{"tenant": t, "keys": keys.get(t, []), **p}
+                            for t, p in sorted(pols.items())]}
+        out.emit(res, human_lines=[
+            f"{r['tenant']:<20} {r.get('max_input_bytes') or '-':>10}  "
+            f"{(r.get('optimize') or {}).get('above_bytes', '-')!s:>10}  "
+            f"keys: {', '.join(r['keys']) or '-'}" for r in res["policies"]]
+            or ["no scope policies"])
+        return EXIT_SUCCESS
+
     if cmd == "storage":
         from . import store as _store
         blobs = _store.build(cfg)
+        if args.storage_cmd in ("scan", "rotate"):
+            from . import db as _db, rotation as _rot
+            conn = _db.connect(cfg.db_file)
+            if args.storage_cmd == "rotate":
+                if not _rot.enabled(cfg):
+                    raise ValidationError(
+                        "Rotation is off",
+                        {"evict": cfg.get("storage.evict"),
+                         "max_bytes": cfg.get("storage.max_bytes")},
+                        ["Set storage.evict=oldest and storage.max_bytes > 0 "
+                         "(BLURD_STORAGE_EVICT / BLURD_STORAGE_MAX_BYTES)"])
+                cap, high, low = _rot.marks(cfg)
+                res = _rot.evict_to(cfg, conn, blobs, low)
+                out.emit(res, human_lines=[f"{k:<20} {v}" for k, v in res.items()])
+                return EXIT_SUCCESS
+            real = blobs.scan()
+            acc = _rot.usage(conn)
+            cap, high, low = _rot.marks(cfg)
+            res = {"backend": blobs.kind, "store_objects": real["objects"],
+                   "store_bytes": real["bytes"], "accounted_bytes": acc,
+                   "drift_bytes": real["bytes"] - acc, "cap_bytes": cap,
+                   "rotation": _rot.enabled(cfg), "high_bytes": high,
+                   "low_bytes": low}
+            out.emit(res, human_lines=[f"{k:<16} {v}" for k, v in res.items()])
+            return EXIT_SUCCESS
         if args.storage_cmd == "check":
             out.emit(blobs.check(), human_lines=[
                 f"backend  {blobs.kind}",

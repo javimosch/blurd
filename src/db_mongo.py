@@ -113,6 +113,12 @@ def init(conn) -> None:
     db["instances"].create_index([("last_seen", pymongo.DESCENDING)])
     db["audit"].create_index([("seq", pymongo.DESCENDING)])
     db["originals"].create_index([("expires_at", pymongo.ASCENDING)])
+    # Rotation: oldest live blobs first. Partial so evicted tombstones do not
+    # sit in front of the seek ($gt "" is the partial-filter form of != "").
+    db["artifacts"].create_index(
+        [("created_at", pymongo.ASCENDING), ("_id", pymongo.ASCENDING)],
+        name="live_created", partialFilterExpression={"blob_path": {"$gt": ""}})
+    db["originals"].create_index([("created_at", pymongo.ASCENDING)])
     db["image_feedback"].create_index([("source_sha", pymongo.ASCENDING),
                                        ("created_at", pymongo.ASCENDING)])
     db["image_feedback"].create_index([("status", pymongo.ASCENDING),
@@ -451,6 +457,46 @@ def expired_blobs(conn, limit: int = 200) -> List[dict]:
     return [{"id": d["_id"], "blob_path": d["blob_path"]} for d in cur]
 
 
+def _open_feedback_shas(conn) -> List[str]:
+    return conn.db["image_feedback"].distinct("source_sha", {"status": "open"})
+
+
+def eviction_candidates(conn, protected: bool, limit: int = 200) -> List[dict]:
+    """See db_sql.eviction_candidates. Open feedback is a small set (a review
+    queue), so it is resolved first and used as an $in / $nin."""
+    shas = _open_feedback_shas(conn)
+    q = {"blob_path": {"$gt": ""},
+         "source_sha": {"$in" if protected else "$nin": shas}}
+    cur = conn.db["artifacts"].find(
+        q, {"source_sha": 1, "blob_path": 1, "blob_size": 1}
+    ).sort([("created_at", 1), ("_id", 1)]).limit(limit)
+    return [{"id": d["_id"], "source_sha": d["source_sha"],
+             "blob_path": d["blob_path"], "blob_size": d.get("blob_size", 0)}
+            for d in cur]
+
+
+def original_eviction_candidates(conn, protected: bool,
+                                 limit: int = 200) -> List[dict]:
+    shas = _open_feedback_shas(conn)
+    q = {"blob_path": {"$gt": ""},
+         "_id": {"$in" if protected else "$nin": shas}}
+    cur = conn.db["originals"].find(q, {"blob_path": 1, "bytes": 1}
+                                    ).sort("created_at", 1).limit(limit)
+    return [{"source_sha": d["_id"], "blob_path": d["blob_path"],
+             "bytes": d.get("bytes", 0)} for d in cur]
+
+
+def evict_artifact(conn, artifact_id: int) -> None:
+    """See db_sql.evict_artifact."""
+    t = now()
+    a = conn.db["artifacts"]
+    a.update_one({"_id": int(artifact_id)},
+                 {"$set": {"blob_path": "", "evicted_at": t}})
+    a.update_one({"_id": int(artifact_id),
+                  "$or": [{"expires_at": None}, {"expires_at": {"$gt": t}}]},
+                 {"$set": {"expires_at": t}})
+
+
 def live_blob_bytes(conn) -> int:
     """Bytes held by live blobs -- see db_sql.live_blob_bytes."""
     agg = list(conn.db["artifacts"].aggregate([
@@ -507,14 +553,15 @@ def thumb_for(conn, sha: str, profile: str = None):
     if profile:
         q["profile_hash"] = profile
     art = _live_first(conn.db["artifacts"].find(
-        q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1}
+        q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1, "evicted_at": 1}
         ).sort("created_at", -1).limit(8))
     if not art:
         return None
     t = conn.db["thumbs"].find_one({"_id": art["_id"]})
     return {"thumb": (bytes(t["jpeg"]) if t and t.get("jpeg") is not None else None),
             "blob_sha": art.get("blob_sha"), "source_sha": art.get("source_sha"),
-            "expires_at": art.get("expires_at"), "id": art["_id"]}
+            "expires_at": art.get("expires_at"),
+            "evicted_at": art.get("evicted_at"), "id": art["_id"]}
 
 
 def blob_ref(conn, sha: str, profile: str = None):
@@ -523,7 +570,7 @@ def blob_ref(conn, sha: str, profile: str = None):
         q["profile_hash"] = profile
     doc = _live_first(conn.db["artifacts"].find(
         q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-            "expires_at": 1}).sort("created_at", -1).limit(8))
+            "expires_at": 1, "evicted_at": 1}).sort("created_at", -1).limit(8))
     return _row(doc, "id")
 
 
@@ -575,7 +622,7 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
             aq["profile_hash"] = {"$in": bound}
     art = _live_first(conn.db["artifacts"].find(
         aq, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-             "expires_at": 1}).sort("created_at", -1).limit(8))
+             "expires_at": 1, "evicted_at": 1}).sort("created_at", -1).limit(8))
     if not art:
         return None
     out = _row(art)
@@ -759,6 +806,17 @@ def revoke_api_key(conn, key_id: str) -> int:
 def all_api_keys(conn):
     return [_row(d, "id") for d in
             conn.db["api_keys"].find({}).sort([("created_at", -1)])]
+
+
+def rename_api_key(conn, key_id: str, name: str) -> int:
+    return conn.db["api_keys"].update_one(
+        {"_id": key_id}, {"$set": {"name": name}}).matched_count
+
+
+def purge_api_key(conn, key_id: str) -> int:
+    """See db_sql.purge_api_key."""
+    return conn.db["api_keys"].delete_one(
+        {"_id": key_id, "revoked_at": {"$ne": None}}).deleted_count
 
 
 def insert_feedback(conn, fb_id: str, kind: str, message: str, context: str,

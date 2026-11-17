@@ -103,12 +103,14 @@ COMMANDS
                               already present is skipped, an id collision is
                               remapped. Audited as key.import.
   dashboard-password <pw>     Set the dashboard basic-auth password.
-  dashboard-keys enable --secret S | disable | status
-                              Allow minting API keys from the dashboard.
-                              OFF by default: a minted key outlives the
-                              dashboard password, so turning one shared browser
-                              login into permanent API access is opt-in and
-                              needs a SECOND secret, sent as X-Blurd-Admin-Secret.
+  dashboard-keys enable [--secret S] | disable | status
+                              Minting API keys from the dashboard is ON by
+                              default (0.23): the dashboard login can create,
+                              rename, revoke and remove keys and edit scope
+                              limits. A minted key outlives the dashboard
+                              password -- set a SECOND secret (--secret, or
+                              BLURD_DASHBOARD_KEY_SECRET) to require it as
+                              X-Blurd-Admin-Secret at mint time, or `disable`.
                               Listing and REVOKING keys is always available --
                               revocation is fail-safe and you want it fast.
   audit [--limit N]           Privileged mutations: key.create, key.import,
@@ -123,9 +125,16 @@ COMMANDS
                               Never fails the caller.
   models list | models pull [NAME|--all]
   config get <key> | config set <key> <value>
-  storage show | storage check
-                              Inspect the blob backend, or round-trip a probe
-                              object through it.
+  storage show | storage check | storage scan | storage rotate
+                              Inspect the blob backend, round-trip a probe
+                              object, compare real store usage (S3 listing or
+                              disk walk) with blurd's accounting, or run one
+                              rotation pass now.
+  scope-policy list | set | unset
+                              Per-scope ingest rules (shared DB, all replicas):
+                              set (--tenant T | --scope-tag X [--scope-meta K=V])
+                              [--max-input-bytes N] [--optimize-above BYTES
+                              --optimize-max-side PX --optimize-quality Q].
   migrate-blobs --to s3|local [--batch N] [--delete-source]
                               Copy blobs between backends. Resumable: anything
                               already present at the destination is skipped.
@@ -155,6 +164,32 @@ PROFILES & TTL
   storage.ttl semantics: the record stores expires_at; once past, blob reads
   answer 410 resource_expired and a sweep prunes the bytes. Metadata, sha,
   detections and tags all survive -- a resubmit regenerates the blob.
+  output.optimize (off unless set): {{"above_bytes":1500000,"max_side":2560,
+  "quality":82}} -- a source larger than above_bytes is downscaled to max_side
+  right after decode and encoded at that quality. Output is always JPEG.
+  Set it per request (?profile=), as an instance default (BLURD_PROFILE), or
+  as a scope policy floor that requests can tighten but never loosen.
+
+STORAGE CAP AND ROTATION
+  storage.max_bytes (BLURD_STORAGE_MAX_BYTES) caps live blobs + retained
+  originals, counted by blurd (identical on local and S3). Default behaviour
+  over the cap: reclaim expired TTL blobs, then 507 storage_full.
+  storage.evict=oldest (BLURD_STORAGE_EVICT) turns refusal into rotation: past
+  evict_high_pct (90) of the cap, the OLDEST objects go -- TTL or not -- until
+  usage is under evict_low_pct (75). Order: expired; originals then blobs of
+  images without open feedback; then those with open feedback. Rows, codes,
+  detections and thumbnails stay; reads answer 410 with reason "evicted".
+  A bucket quota or full filesystem refusing a write triggers rotation and a
+  retry. The database is never rotated: storage.max_disk_pct bounds it with a
+  507, and growing the disk or pruning rows is the operator's call.
+
+SCOPE POLICIES
+  One blurd, several integrations: `blurd scope-policy set --scope-tag implB
+  --max-input-bytes 2000000 --optimize-above 1500000` makes every key with that
+  scope refuse sources over 2 MB (422, naming the limit) and optimize those
+  over 1.5 MB. --ttl S sets the scope's blob retention (requests may only ask
+  for less) and --max-keep-original S caps keep_original. --tenant global
+  applies to unscoped keys. Also editable in dashboard -> keys -> scope limits.
 
 ORIGINALS (opt-in source retention)
   Off by default: blurd never keeps the source image unless BOTH the instance
@@ -365,7 +400,8 @@ def as_json() -> dict:
             "feedback": "Send feedback to this deployment and the shared relay",
             "models": "list | pull detector models",
             "config": "get | set configuration values",
-            "storage": "show | check the blob backend",
+            "storage": "show | check | scan | rotate the blob backend",
+            "scope-policy": "list | set | unset per-scope ingest rules",
             "migrate-blobs": "Copy blobs between storage backends",
             "vacuum": "Reclaim free database pages (blocking)",
             "doctor": "Environment self-check",

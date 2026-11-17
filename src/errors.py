@@ -126,7 +126,10 @@ class Expired(BlurdError):
     def __init__(self, resource_type, resource_id, details=None):
         super().__init__(
             EXIT_RESOURCE_EXPIRED, "resource_expired",
-            f"{resource_type} '{resource_id}' has expired",
+            (f"{resource_type} '{resource_id}' was evicted to stay under the "
+             "storage cap (oldest first)"
+             if (details or {}).get("reason") == "evicted"
+             else f"{resource_type} '{resource_id}' has expired"),
             {"resource_type": resource_type, "resource_id": resource_id,
              **(details or {})},
             recoverable=True,

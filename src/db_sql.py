@@ -87,6 +87,8 @@ def migrate(conn) -> None:
                      "ON artifacts(expires_at)")
     if "external_ids" in tables and "profile_hash" not in _columns(conn, "external_ids"):
         conn.execute("ALTER TABLE external_ids ADD COLUMN profile_hash TEXT")
+    if "artifacts" in tables and "evicted_at" not in _columns(conn, "artifacts"):
+        conn.execute("ALTER TABLE artifacts ADD COLUMN evicted_at TEXT")
     if "artifacts" in tables and "manual_regions" not in _columns(conn, "artifacts"):
         conn.execute("ALTER TABLE artifacts ADD COLUMN manual_regions TEXT NOT NULL DEFAULT '[]'")
 
@@ -414,7 +416,7 @@ def thumb_for(conn, sha: str, profile: str = None):
     and a discarded JSON document per tile, 24 times a page."""
     # COALESCE so a database mid-migration serves thumbnails from either place.
     col = ("COALESCE(t.jpeg, a.thumb)" if has_legacy_thumb_column(conn) else "t.jpeg")
-    sql = (f"SELECT {col} AS thumb, a.id, a.blob_sha, a.source_sha, a.expires_at FROM artifacts a "
+    sql = (f"SELECT {col} AS thumb, a.id, a.blob_sha, a.source_sha, a.expires_at, a.evicted_at FROM artifacts a "
            "LEFT JOIN thumbs t ON t.artifact_id = a.id WHERE a.source_sha=?")
     args = [sha]
     if profile:
@@ -426,7 +428,7 @@ def thumb_for(conn, sha: str, profile: str = None):
 
 def blob_ref(conn, sha: str, profile: str = None):
     """Blob path + etag without building a record."""
-    sql = ("SELECT a.id, a.blob_path, a.blob_sha, a.mime, a.source_sha, a.expires_at FROM artifacts a "
+    sql = ("SELECT a.id, a.blob_path, a.blob_sha, a.mime, a.source_sha, a.expires_at, a.evicted_at FROM artifacts a "
            "WHERE a.source_sha=?")
     args = [sha]
     if profile:
@@ -441,7 +443,7 @@ def artifact_for_sha(conn, sha: str, profile: str = None):
     fields a manual-region edit needs."""
     sql = ("SELECT a.id, a.source_sha, a.profile_hash, a.profile_json,"
            " a.blob_path, a.blob_sha,"
-           " a.blob_size, a.mime, a.needs_review, a.manual_regions, a.expires_at"
+           " a.blob_size, a.mime, a.needs_review, a.manual_regions, a.expires_at, a.evicted_at"
            " FROM artifacts a WHERE a.source_sha=?")
     args = [sha]
     if profile:
@@ -635,6 +637,21 @@ def all_api_keys(conn):
     return conn.execute("SELECT * FROM api_keys ORDER BY created_at DESC").fetchall()
 
 
+def rename_api_key(conn, key_id: str, name: str) -> int:
+    cur = conn.execute("UPDATE api_keys SET name=? WHERE id=?", (name, key_id))
+    conn.commit()
+    return cur.rowcount
+
+
+def purge_api_key(conn, key_id: str) -> int:
+    """Remove a REVOKED key's row. An active key must be revoked first, so a
+    delete can never be the thing that silently cuts a caller off."""
+    cur = conn.execute(
+        "DELETE FROM api_keys WHERE id=? AND revoked_at IS NOT NULL", (key_id,))
+    conn.commit()
+    return cur.rowcount
+
+
 def insert_feedback(conn, fb_id: str, kind: str, message: str, context: str,
                     reporter: str, version: str, ip: str) -> bool:
     """cli-feedback-spec: id is the idempotency key; a duplicate submit is a
@@ -694,6 +711,46 @@ def expired_blobs(conn, limit: int = 200) -> List[dict]:
         "SELECT id, blob_path FROM artifacts WHERE expires_at IS NOT NULL "
         "AND expires_at < ? AND blob_path != '' LIMIT ?",
         (now(), limit)).fetchall()
+
+
+_OPEN_FB = ("EXISTS (SELECT 1 FROM image_feedback f WHERE "
+            "f.source_sha = {t}.source_sha AND f.status = 'open')")
+
+
+def eviction_candidates(conn, protected: bool, limit: int = 200) -> List[dict]:
+    """Oldest live blobs first, for rotation. `protected` selects images with
+    open feedback (evicted last) instead of the rest."""
+    cond = _OPEN_FB.format(t="a")
+    if not protected:
+        cond = "NOT " + cond
+    return conn.execute(
+        "SELECT a.id, a.source_sha, a.blob_path, a.blob_size FROM artifacts a "
+        f"WHERE a.blob_path != '' AND {cond} "
+        "ORDER BY a.created_at, a.id LIMIT ?", (limit,)).fetchall()
+
+
+def original_eviction_candidates(conn, protected: bool,
+                                 limit: int = 200) -> List[dict]:
+    """Oldest live retained originals first -- see eviction_candidates."""
+    cond = _OPEN_FB.format(t="o")
+    if not protected:
+        cond = "NOT " + cond
+    return conn.execute(
+        "SELECT o.source_sha, o.blob_path, o.bytes FROM originals o "
+        f"WHERE o.blob_path != '' AND {cond} "
+        "ORDER BY o.created_at LIMIT ?", (limit,)).fetchall()
+
+
+def evict_artifact(conn, artifact_id: int) -> None:
+    """Rotation removed the blob. Same tombstone as a TTL expiry (the row,
+    detections, codes and thumbnail stay) but stamped, so a read can say
+    "evicted" rather than "expired", and with expires_at pulled to now so
+    every path that already answers 410 for a TTL does so here too."""
+    t = now()
+    conn.execute(
+        "UPDATE artifacts SET blob_path='', evicted_at=?, "
+        "expires_at=CASE WHEN expires_at IS NULL OR expires_at > ? "
+        "THEN ? ELSE expires_at END WHERE id=?", (t, t, t, artifact_id))
 
 
 def live_blob_bytes(conn) -> int:
@@ -759,7 +816,7 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
     `tenant=None` means an unscoped caller and searches across tenants."""
     tcol = ("COALESCE(t.jpeg, a.thumb)" if (with_thumb and has_legacy_thumb_column(conn))
             else "t.jpeg")
-    sql = (f"""SELECT a.id, a.blob_path, a.blob_sha, a.mime, {tcol} AS thumb, a.source_sha, a.expires_at
+    sql = (f"""SELECT a.id, a.blob_path, a.blob_sha, a.mime, {tcol} AS thumb, a.source_sha, a.expires_at, a.evicted_at
                FROM external_ids e
                JOIN artifacts a ON a.source_sha = e.source_sha
                LEFT JOIN thumbs t ON t.artifact_id = a.id

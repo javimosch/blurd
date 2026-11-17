@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -19,9 +20,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import (__version__, auth, db, jobs as jobs_mod, originals, pipeline,
-               plugins, scope as scope_mod)
+               plugins, policy, runtime, scope as scope_mod)
 from .client import LocalClient
-from .config import Config, DEFAULT_PROFILE, REDACT_MODES
+from .config import (Config, DEFAULT_PROFILE, OPTIMIZE_DEFAULTS,
+                     OPTIMIZE_LIMITS, REDACT_MODES)
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
                      NotFound, RateLimited, ValidationError)
 
@@ -169,6 +171,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):   self._dispatch("POST")
     def do_PUT(self):    self._dispatch("PUT")
     def do_DELETE(self): self._dispatch("DELETE")
+    def do_PATCH(self):  self._dispatch("PATCH")
     def do_HEAD(self):   self._dispatch("GET")
 
     def _dispatch(self, method):
@@ -494,13 +497,14 @@ class Handler(BaseHTTPRequestHandler):
     def _ui_keys(self, client, conn, cfg):
         """List is always available -- seeing which keys exist and when each was
         last used is plain operational hygiene. Creation is gated."""
+        secret = cfg.get("dashboard_key_secret")
         if self.command == "GET":
             return self._send(200, {"ok": True, "data": {
                 "keys": auth.listing(conn),
                 "creation_enabled": bool(cfg.get("dashboard_allow_key_creation")),
-                "creation_requires_secret": True,
-                "note": ("Key creation from the dashboard is disabled. Enable it "
-                         "with: blurd dashboard-keys enable --secret <secret>")
+                "creation_requires_secret": bool(secret),
+                "note": ("Key creation from the dashboard is disabled "
+                         "(BLURD_DASHBOARD_ALLOW_KEY_CREATION=false).")
                         if not cfg.get("dashboard_allow_key_creation") else None,
             }})
         if self.command != "POST":
@@ -509,10 +513,13 @@ class Handler(BaseHTTPRequestHandler):
         if not cfg.get("dashboard_allow_key_creation"):
             raise Conflict(
                 "Key creation from the dashboard is disabled",
-                {"reason": "a minted key outlives the dashboard password, so "
-                           "this is opt-in",
-                 "enable": "blurd dashboard-keys enable --secret <secret>"})
-        if not auth.check_step_up(self.headers, cfg.get("dashboard_key_secret")):
+                {"reason": "BLURD_DASHBOARD_ALLOW_KEY_CREATION=false on this "
+                           "instance",
+                 "enable": "blurd dashboard-keys enable [--secret <secret>]"})
+        # On by default (0.23): the dashboard login is enough. An operator who
+        # wants a second factor for minting sets BLURD_DASHBOARD_KEY_SECRET,
+        # and then it is required.
+        if secret and not auth.check_step_up(self.headers, secret):
             raise AuthFailed(
                 "The admin secret is required to mint an API key",
                 {"header": "X-Blurd-Admin-Secret"},
@@ -568,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
         if "id" in row.keys() and row["id"] is not None:
             db.expire_artifact(conn, row["id"])
             conn.commit()
-        raise Expired(res_type, res_id, {"expired_at": row["expires_at"]})
+        raise Expired(res_type, res_id, db.expiry_detail(row))
 
     def _serve_image(self, client, conn, sha, profile, thumb=False, scope=None):
         """Serve bytes from one indexed lookup.
@@ -680,9 +687,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._ui_keys(client, conn, cfg)
         m = re.match(r"^/keys/(?P<kid>[0-9a-f]{8,32})$", sub)
         if m and self.command == "DELETE":
-            data = auth.revoke(conn, m.group("kid"), actor="dashboard",
-                               source_ip=self.address_string())
+            if _truthy(self._one(q, "purge")):
+                data = auth.purge(conn, m.group("kid"), actor="dashboard",
+                                  source_ip=self.address_string())
+            else:
+                data = auth.revoke(conn, m.group("kid"), actor="dashboard",
+                                   source_ip=self.address_string())
             return self._send(200, {"ok": True, "data": data})
+        if m and self.command == "PATCH":
+            payload = self._json_body()
+            data = auth.rename(conn, m.group("kid"), payload.get("name"),
+                               actor="dashboard", source_ip=self.address_string())
+            return self._send(200, {"ok": True, "data": data})
+        if sub.rstrip("/") == "/scope-policies":
+            return self._send(200, {"ok": True, "data": _scope_policies(conn, cfg)})
+        m = re.match(r"^/scope-policies/(?P<t>global|t_[0-9a-f]{16})$", sub)
+        if m and self.command in ("PUT", "DELETE"):
+            tenant = m.group("t")
+            pol = None if self.command == "DELETE" else \
+                policy.validate(self._json_body())
+            policy.put(conn, tenant, pol)
+            db.audit(conn, "dashboard",
+                     "scope_policy." + ("unset" if pol is None else "set"),
+                     tenant, self.address_string(), pol or {})
+            conn.commit()
+            return self._send(200, {"ok": True, "data": _scope_policies(conn, cfg)})
         if sub.rstrip("/") == "/audit":
             return self._send(200, {"ok": True, "data": db.audit_list(
                 conn, min(int(self._one(q, "limit", 50) or 50), 200))})
@@ -734,8 +763,10 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise ValidationError("Request body is not valid JSON")
                 changes = _detect_settings(payload)
-                for key, value in changes.items():
-                    cfg.set(f"profile.detect.{key}", value)
+                # Shared row, not config.json: every replica, survives restarts.
+                runtime.put(conn, {f"profile.detect.{k}": v
+                                   for k, v in changes.items()})
+                cfg.refresh()
                 db.audit(conn, "dashboard", "profile.detect", "detect",
                          self.address_string(), changes)
                 conn.commit()
@@ -750,6 +781,8 @@ class Handler(BaseHTTPRequestHandler):
                     "plate": {k: DEFAULT_PROFILE["detect"]["plate"].get(k)
                               for k in ("min_score", "min_aspect", "max_area")}},
                 "profile_hash": Config.hash_of(prof),
+                "locked": [p for p in runtime._env_locked_paths()
+                           if p.startswith("profile.detect.")],
                 "limits": DETECT_LIMITS}})
         if sub.rstrip("/") == "/profile":
             if self.command == "POST":
@@ -761,7 +794,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValidationError(
                             "allowed_modes must be a non-empty list of known modes",
                             {"known": list(REDACT_MODES)})
-                    cfg.set("allowed_redact_modes", allowed)
+                    runtime.put(conn, {"allowed_redact_modes": allowed})
+                    cfg.refresh()
                 mode = payload.get("mode")
                 if not mode:
                     raise ValidationError("mode is required",
@@ -772,8 +806,9 @@ class Handler(BaseHTTPRequestHandler):
                 if modes is not None:
                     test["redact"]["modes"] = modes
                 cfg.resolve_profile(test)
-                cfg.set("profile.redact.mode", mode)
-                cfg.set("profile.redact.modes", modes)
+                runtime.put(conn, {"profile.redact.mode": mode,
+                                   "profile.redact.modes": modes or None})
+                cfg.refresh()
                 db.audit(conn, "dashboard", "profile.update",
                          "redact", self.address_string(),
                          {"mode": mode, "modes": modes,
@@ -784,7 +819,19 @@ class Handler(BaseHTTPRequestHandler):
                 "redact": redact,
                 "allowed_redact_modes": cfg.get(
                     "allowed_redact_modes", list(REDACT_MODES)),
-                "known_modes": list(REDACT_MODES)}})
+                "known_modes": list(REDACT_MODES),
+                "locked": [p for p in runtime._env_locked_paths()
+                           if p.startswith("profile.redact") or
+                           p == "allowed_redact_modes"]}})
+        if sub.rstrip("/") == "/settings/runtime":
+            if self.command == "POST":
+                changes = self._json_body()
+                runtime.put(conn, changes)
+                cfg.refresh()
+                db.audit(conn, "dashboard", "settings.runtime", "runtime",
+                         self.address_string(), changes)
+                conn.commit()
+            return self._send(200, {"ok": True, "data": runtime.describe(cfg, conn)})
         if sub.rstrip("/") == "/images":
             return self._send(200, {"ok": True, "data": client.list(**_filters(q))})
         if sub.rstrip("/") == "/stats":
@@ -864,7 +911,7 @@ class Handler(BaseHTTPRequestHandler):
             if not art:
                 raise NotFound("image", sha)
             if not art["blob_path"] or db.artifact_expired(art):
-                raise Expired("blob", sha)
+                raise Expired("blob", sha, db.expiry_detail(art))
             out = pipeline.apply_regions(cfg, conn, art,
                                          _regions(payload.get("regions")))
             db.audit(conn, "dashboard", "image.manual_regions", sha,
@@ -901,6 +948,31 @@ DETECT_LIMITS = {"min_score": [0.05, 0.99], "min_aspect": [0.0, 5.0],
                  "max_area": [0.0, 1.0]}
 _DETECT_KEYS = {"face": ("min_score",),
                 "plate": ("min_score", "min_aspect", "max_area")}
+
+
+def _scope_policies(conn, cfg) -> dict:
+    """Every scope that has a key or a policy, with its keys and its rules --
+    the dashboard edits limits per scope, not per key."""
+    pols = policy.all_policies(conn)
+    scopes = {}
+    for k in auth.listing(conn):
+        if k["revoked"]:
+            continue
+        sc = scopes.setdefault(k["tenant"], {
+            "tenant": k["tenant"], "description": k["scope_description"],
+            "keys": []})
+        sc["keys"].append(k["name"])
+    for t in pols:
+        scopes.setdefault(t, {"tenant": t, "keys": [], "description":
+                              "unrestricted" if t == "global" else "(no active key)"})
+    for t, sc in scopes.items():
+        sc["policy"] = pols.get(t)
+    return {"scopes": sorted(scopes.values(),
+                             key=lambda x: (x["tenant"] != "global", x["description"])),
+            "instance_max_input_bytes": int(cfg.get("fetch", {}).get(
+                "max_bytes", 5 * 1024 * 1024)),
+            "optimize_limits": {k: list(v) for k, v in OPTIMIZE_LIMITS.items()},
+            "optimize_defaults": OPTIMIZE_DEFAULTS}
 
 
 def _detect_settings(payload) -> dict:
@@ -1094,6 +1166,16 @@ class BlurdServer(BoundedThreadingHTTPServer):
         cfg.ensure_dirs()
         db.dialect(cfg)               # bind the backend before any query runs
         db.init(cfg.db_file)
+        # Dashboard settings written to config.json by an older version move to
+        # the shared runtime row once (only where the row has none).
+        try:
+            moved = runtime.adopt_file(cfg, db.connect(cfg.db_file))
+            if moved:
+                cfg.refresh()
+                print("settings: moved to the shared database: " + ", ".join(moved),
+                      file=sys.stderr)
+        except Exception:
+            pass
         from . import store as _store
         # Built once and shared: an S3 store is a handful of immutable fields,
         # and rebuilding it per request would re-read config on every tile.

@@ -298,7 +298,7 @@ paths:
       responses:
         "200": { description: "image/jpeg or image/png" }
         "404": { description: not found }
-        "410": { description: "resource_expired: TTL'd blob was pruned; resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "410": { description: "resource_expired: TTL'd or evicted blob was pruned (details.reason ttl|evicted); resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/originals/{sha}:
     get:
       summary: Opt-in retained source image bytes
@@ -457,7 +457,7 @@ paths:
         "200": { description: "image bytes; ETag + Cache-Control set" }
         "304": { description: "If-None-Match matched" }
         "404": { description: "no such external_id" }
-        "410": { description: "resource_expired: TTL'd blob was pruned; resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "410": { description: "resource_expired: TTL'd or evicted blob was pruned (details.reason ttl|evicted); resubmit to regenerate", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   /v1/thumbs/by-code/{external_id}:
     get:
       summary: Thumbnail by unique code
@@ -546,4 +546,4 @@ paths:
   /v1/stats:
     get:
       summary: Aggregate counters
-      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, storage_used_bytes (redacted + retained originals), disk {path,total_bytes,used_bytes,free_bytes,used_pct,max_pct} (operator key only), tags[]" } }
+      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, storage_used_bytes (redacted + retained originals), storage_rotation {enabled, high_bytes, low_bytes}, disk {path,total_bytes,used_bytes,free_bytes,used_pct,max_pct} (operator key only), tags[]" } }

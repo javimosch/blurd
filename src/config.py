@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -52,7 +53,7 @@ DEFAULTS = {
     # API key outlives it. Turning this on makes that password the root of
     # trust for machine access, so it also demands a second secret.
     # Enable with: blurd dashboard-keys enable --secret <s>
-    "dashboard_allow_key_creation": False,
+    "dashboard_allow_key_creation": True,
     "dashboard_key_secret": None,
     # Instance policy: which redaction modes requests may ask for. Not part of
     # the profile (it is not a processing parameter, it is a policy), so it
@@ -100,6 +101,16 @@ DEFAULTS = {
         # (e.g. MinIO on the same VM). See spec/storage.md.
         "max_disk_pct": 0,
         "disk_path": None,
+        # Rotation (opt-in): with max_bytes set and evict="oldest", crossing
+        # evict_high_pct of the cap deletes the OLDEST live objects -- TTL or
+        # not -- until usage is back under evict_low_pct, instead of refusing
+        # with 507. Order: expired, then originals and blobs of images with no
+        # open feedback, then those with open feedback. Rows (and thumbs) stay:
+        # an evicted image answers 410 with reason "evicted". The database is
+        # deliberately NOT rotated; max_disk_pct is what bounds it.
+        "evict": "off",
+        "evict_high_pct": 90,
+        "evict_low_pct": 75,
     },
     # Seconds to let in-flight jobs finish after SIGTERM. Should sit inside
     # the orchestrator's grace period (k8s terminationGracePeriodSeconds).
@@ -146,22 +157,55 @@ class Config:
         self.pid_file = self.home / "blurd.pid"
         self.log_file = self.home / "blurd.log"
         self._data = None
+        self._rt = None          # last runtime overlay read from the database
+        self._rt_at = 0.0
 
     def ensure_dirs(self) -> None:
         for d in (self.home, self.blobs_dir, self.models_dir):
             d.mkdir(parents=True, exist_ok=True)
 
+    def _runtime(self):
+        """The shared runtime row (src/runtime.py), at most every RUNTIME_TTL
+        seconds. Only once the database backend is configured -- reading it
+        earlier would recurse (the backend is chosen from this config) -- and
+        failing open: no database yet means no runtime layer, not an error."""
+        from . import db_sql, runtime
+        now = time.monotonic()
+        if self._rt is not None and now - self._rt_at < runtime.RUNTIME_TTL:
+            return self._rt
+        self._rt_at = now
+        if "d" not in db_sql._DIALECT:
+            return self._rt or {}
+        try:
+            from . import db
+            rt = runtime.load(db.connect(self.db_file))
+        except Exception:
+            rt = self._rt or {}
+        if rt != self._rt:
+            self._rt = rt
+            self._data = None
+        return rt
+
     @property
     def data(self) -> Dict[str, Any]:
+        rt = self._runtime()
         if self._data is None:
-            self._data = dict(DEFAULTS)
+            data = dict(DEFAULTS)
             if self.config_file.exists():
                 try:
-                    self._data = _deep_merge(self._data, json.loads(self.config_file.read_text()))
+                    data = _deep_merge(data, json.loads(self.config_file.read_text()))
                 except (OSError, ValueError):
                     pass
-            self._data = _apply_env(self._data)
+            if rt:
+                from .runtime import overlay
+                data = overlay(data, rt)
+            self._data = _apply_env(data)
         return self._data
+
+    def refresh(self) -> None:
+        """Re-read the runtime row now (after this process wrote it)."""
+        self._rt_at = 0.0
+        self._data = None
 
     def get(self, key: str, default=None):
         node = self.data
@@ -243,6 +287,19 @@ class Config:
             if m not in REDACT_MODES:
                 raise ValidationError(
                     f"Unknown redact mode '{m}'", {"known": list(REDACT_MODES)})
+        out = prof.setdefault("output", {})
+        opt = out.get("optimize")
+        if opt is not None and not isinstance(opt, dict):
+            raise ValidationError(
+                'output.optimize must be an object like {"above_bytes": 1500000}',
+                {"got": type(opt).__name__})
+        above = int((opt or {}).get("above_bytes") or 0)
+        if above <= 0:
+            # Off is ABSENT, not {"above_bytes": 0}: the default profile_hash
+            # must not move for instances that never asked for optimization.
+            out.pop("optimize", None)
+        else:
+            out["optimize"] = _optimize_block(opt, above)
         ttl = prof.get("storage", {}).get("ttl")
         if ttl is not None:
             # Seconds; part of profile_hash, so a different TTL never reuses a
@@ -258,6 +315,31 @@ class Config:
     @staticmethod
     def hash_of(profile: Dict[str, Any]) -> str:
         return profile_hash(profile)
+
+
+OPTIMIZE_LIMITS = {"above_bytes": (1, 1 << 31), "max_side": (256, 16384),
+                   "quality": (30, 95)}
+OPTIMIZE_DEFAULTS = {"max_side": 2560, "quality": 82}
+
+
+def _optimize_block(opt: Dict[str, Any], above: int) -> Dict[str, Any]:
+    """Validate `output.optimize`: sources larger than `above_bytes` are
+    downscaled to `max_side` (long edge) right after decode and encoded at
+    `quality` -- smaller output, less redaction work. Detection already runs
+    on a 1280 px copy, so what it finds does not change."""
+    block = {"above_bytes": above,
+             "max_side": int(opt.get("max_side") or OPTIMIZE_DEFAULTS["max_side"]),
+             "quality": int(opt.get("quality") or OPTIMIZE_DEFAULTS["quality"])}
+    for k, (lo, hi) in OPTIMIZE_LIMITS.items():
+        if not lo <= block[k] <= hi:
+            raise ValidationError(
+                f"output.optimize.{k} must be between {lo} and {hi}",
+                {"got": block[k], "min": lo, "max": hi})
+    unknown = set(opt) - set(block)
+    if unknown:
+        raise ValidationError("Unknown key in output.optimize",
+                              {"unknown": sorted(unknown), "known": sorted(block)})
+    return block
 
 
 # Settings a container must be able to set without writing a config file.
@@ -276,13 +358,16 @@ ENV_OVERRIDES = {
     "BLURD_STORAGE_MAX_BYTES": ("storage.max_bytes", int),
     "BLURD_STORAGE_MAX_DISK_PCT": ("storage.max_disk_pct", int),
     "BLURD_STORAGE_DISK_PATH": ("storage.disk_path", str),
+    "BLURD_STORAGE_EVICT": ("storage.evict", str),
+    "BLURD_STORAGE_EVICT_HIGH_PCT": ("storage.evict_high_pct", int),
+    "BLURD_STORAGE_EVICT_LOW_PCT": ("storage.evict_low_pct", int),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),
     "BLURD_DASHBOARD_PASSWORD": ("dashboard_password", str),
     "BLURD_DASHBOARD_KEY_SECRET": ("dashboard_key_secret", str),
-    # Still needs BLURD_DASHBOARD_KEY_SECRET: creation demands the second
-    # secret whatever enables it (rule 10).
+    # Default true since 0.23; when BLURD_DASHBOARD_KEY_SECRET is set every
+    # mint must also present it (rule 10).
     "BLURD_DASHBOARD_ALLOW_KEY_CREATION": (
         "dashboard_allow_key_creation",
         lambda s: s.strip().lower() in ("1", "true", "yes", "on")),

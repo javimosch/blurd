@@ -397,13 +397,75 @@ def main():
         s, b, _ = http_raw(f"{a.url}/ui-api/keys", method="POST", headers=authed,
                            body=b'{"name":"conformance-probe"}')
         creation_on = keys_body.get("creation_enabled")
-        if creation_on:
-            check("with creation enabled, minting still needs the admin secret",
+        if creation_on and keys_body.get("creation_requires_secret"):
+            check("with an admin secret configured, minting needs it",
                   s == 401, f"got {s}")
+        elif creation_on:
+            # 0.23 default: the dashboard login mints; exercise the whole CRUD.
+            kid = (json.loads(b or b"{}").get("data") or {}).get("id")
+            check("the dashboard mints a key by default", s == 201 and kid,
+                  f"got {s}")
+            if kid:
+                s, b, _ = http_raw(f"{a.url}/ui-api/keys/{kid}", method="PATCH",
+                                   headers=authed, body=b'{"name":"conformance-renamed"}')
+                check("a key can be renamed from the dashboard", s == 200, f"got {s}")
+                s, _, _ = http_raw(f"{a.url}/ui-api/keys/{kid}?purge=1",
+                                   method="DELETE", headers=authed)
+                check("an ACTIVE key cannot be removed, only revoked (409)",
+                      s == 409, f"got {s}")
+                s, _, _ = http_raw(f"{a.url}/ui-api/keys/{kid}", method="DELETE",
+                                   headers=authed)
+                check("the key is revoked", s == 200, f"got {s}")
+                s, _, _ = http_raw(f"{a.url}/ui-api/keys/{kid}?purge=1",
+                                   method="DELETE", headers=authed)
+                check("a revoked key can be removed", s == 200, f"got {s}")
+                s, b, _ = http_raw(f"{a.url}/ui-api/keys", headers={"Authorization": basic})
+                ids = [k["id"] for k in json.loads(b)["data"]["keys"]]
+                check("a removed key is gone from the list", kid not in ids)
+            # Scope limits round-trip on the unrestricted scope, then cleared.
+            s, b, _ = http_raw(f"{a.url}/ui-api/scope-policies/global", method="PUT",
+                               headers=authed,
+                               body=b'{"optimize":{"above_bytes":3000000},"ttl":3600}')
+            sc = [x for x in (json.loads(b or b"{}").get("data") or {}).get("scopes", [])
+                  if x["tenant"] == "global"]
+            check("a scope limit can be set from the dashboard",
+                  s == 200 and sc and (sc[0].get("policy") or {}).get("ttl") == 3600,
+                  f"got {s}")
+            s, b, _ = http_raw(f"{a.url}/ui-api/scope-policies/global", method="PUT",
+                               headers=authed, body=b'{"ttl":5}')
+            check("an out-of-range scope limit is refused (422)", s == 422, f"got {s}")
+            s, _, _ = http_raw(f"{a.url}/ui-api/scope-policies/global",
+                               method="DELETE", headers=authed)
+            check("a scope limit can be cleared", s == 200, f"got {s}")
         else:
             check("with creation disabled, minting is refused (409)", s == 409, f"got {s}")
             check("the refusal says how to enable it",
                   "enable" in json.loads(b).get("error", {}).get("details", {}))
+
+        # Runtime defaults (0.23): shared-DB settings with per-path validation.
+        s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                           headers=authed,
+                           body=b'{"profile.output.quality": 87, "storage.evict": "off"}')
+        rt = (json.loads(b or b"{}").get("data") or {}).get("settings") or {}
+        q = rt.get("profile.output.quality") or {}
+        check("a runtime default can be changed from the dashboard",
+              s == 200 and q.get("value") == 87 and q.get("source") == "dashboard",
+              f"got {s}/{q}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                           headers=authed, body=b'{"db.backend": "mongo"}')
+        check("infrastructure settings are not writable from the dashboard (422)",
+              s == 422, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                           headers=authed, body=b'{"profile.output.quality": 5}')
+        check("an out-of-range runtime default is refused (422)", s == 422, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                           headers=authed, body=b'{"profile.output.quality": null}')
+        rt = (json.loads(b or b"{}").get("data") or {}).get("settings") or {}
+        check("null puts a runtime default back to the default",
+              s == 200 and (rt.get("profile.output.quality") or {}).get("source") != "dashboard",
+              f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                           headers=authed, body=b'{"storage.evict": null}')
 
         s, b, _ = http_raw(f"{a.url}/ui-api/audit", headers={"Authorization": basic})
         check("audit trail is readable from the dashboard", s == 200, f"got {s}")
@@ -947,7 +1009,9 @@ def main():
 
         kept = _mark_bytes(raw, f"orig-keep-{time.time_ns()}")
         ksha = hashlib.sha256(kept).hexdigest()
-        s, body = submit_keep(kept, 61)
+        # 300 vs the later 60: the gap must survive slow backends (a 61/60 pair
+        # flaked on Mongo+S3 once the reprocess in between took >1 s).
+        s, body = submit_keep(kept, 300)
         orig = ((body.get("data") or {}).get("result") or {}).get("original") or {}
         check("keep_original returns original.url and expires_at",
               s == 200 and orig.get("url") == f"/v1/originals/{ksha}"

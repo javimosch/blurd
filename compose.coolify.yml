@@ -47,6 +47,9 @@ services:
       # Disk guard (spec/storage.md): refuse new work at 90% used. Valid here
       # because blurd-home and minio-data are volumes on the same VM disk.
       BLURD_STORAGE_MAX_DISK_PCT: ${BLURD_STORAGE_MAX_DISK_PCT:-90}
+      # Rotation (spec/storage.md): "oldest" evicts the oldest blobs past 90%
+      # of STORAGE_MAX_BYTES instead of answering 507. Off until decided.
+      BLURD_STORAGE_EVICT: ${BLURD_STORAGE_EVICT:-off}
       # Opt-in original retention (spec/originals.md). Empty = not pinned, so
       # the dashboard settings tab controls it; any value set here locks it.
       BLURD_ORIGINALS_ENABLED: ${BLURD_ORIGINALS_ENABLED:-}

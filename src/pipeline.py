@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-from . import db, detect, diskguard, fetch, originals, redact, store
+from . import db, detect, diskguard, fetch, originals, policy, redact, rotation, store
 from .canonical import canonical_json, sha256_hex
 from .config import Config
 from .errors import StorageFull, ValidationError
@@ -152,15 +152,22 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
             tenant: str = "global",
             keep_original: Optional[int] = None) -> Dict[str, Any]:
     timer = _Timer()
+    conn = db.connect(cfg.db_file)
+    # Idempotent with jobs.submit (strictest value wins), and covers callers
+    # that reach the pipeline directly -- reprocess, the local CLI.
+    pol = policy.for_tenant(conn, tenant)
+    overrides = policy.tighten(cfg, pol, overrides)
+    keep_original = policy.clamp_keep(pol, keep_original)
     profile = cfg.resolve_profile(overrides)
     phash = Config.hash_of(profile)
-    conn = db.connect(cfg.db_file)
 
     t0 = time.perf_counter()
     raw, mime, kind, ref = acquire(cfg, url=url, path=path, data=data)
     timer.mark("fetch_ms", t0)
-    sha = sha256_hex(raw)
     source_bytes = len(raw)
+    # URL sources are only measurable here, after the fetch.
+    policy.check_size(pol, source_bytes, tenant)
+    sha = sha256_hex(raw)
 
     # Cache hit is on (source bytes, full profile) -- never on the sha alone,
     # or a model upgrade would silently keep serving stale redactions.
@@ -169,7 +176,7 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     live = (cached and cached["blob_path"] and not db.artifact_expired(cached))
     if live and not force and blobs.exists(cached["blob_path"]):
         if keep_original:
-            diskguard.check(cfg)
+            _check_storage_cap(cfg, conn, blobs, len(raw))
             # The redacted output is cached but these bytes are in hand, so a
             # retention request is honoured on a cache hit too.
             originals.retain(cfg, conn, blobs, sha, raw, mime, keep_original)
@@ -186,8 +193,19 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     img = decode(raw, int(cfg.get("fetch.max_pixels", 50_000_000)))
     timer.mark("decode_ms", t0)
     height, width = img.shape[:2]
+    out_cfg = dict(profile["output"])
+    opt = out_cfg.pop("optimize", None)
+    optimized = bool(opt and source_bytes > opt["above_bytes"])
+    if optimized:
+        # Work on the smaller frame from here on: detection, redaction and
+        # encoding all get cheaper, and the stored output is what was asked.
+        if max(height, width) > opt["max_side"]:
+            s_ = opt["max_side"] / float(max(height, width))
+            img = cv2.resize(img, (int(width * s_), int(height * s_)),
+                             interpolation=cv2.INTER_AREA)
+        out_cfg["quality"] = min(int(out_cfg.get("quality", 90)), opt["quality"])
     if keep_original:
-        diskguard.check(cfg)
+        _check_storage_cap(cfg, conn, blobs, len(raw))
         # After decode, so only a real image is retained; before detection,
         # so the bytes can be dropped now rather than held through the
         # pipeline. A later failure leaves an original that the TTL prunes.
@@ -204,7 +222,8 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     timer.mark("redact_ms", t0)
 
     t0 = time.perf_counter()
-    blob, out_mime, ext = encode(out_img, profile["output"])
+    out_h, out_w = out_img.shape[:2]
+    blob, out_mime, ext = encode(out_img, out_cfg)
     thumb = _thumb(out_img)
     timer.mark("encode_ms", t0)
     # Everything after this point is bytes and rows; the decoded frame is the
@@ -217,7 +236,7 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
     # a row pointing at an object that was never written is a broken record.
     rel = store.rel_path(sha, phash, ext)
     _check_storage_cap(cfg, conn, blobs, len(blob))
-    blobs.put(rel, blob, out_mime)
+    _put_with_room(cfg, conn, blobs, rel, blob, out_mime)
     timer.mark("store_ms", t0)
 
     n_faces = sum(1 for d in dets if d.cls == "face")
@@ -235,6 +254,8 @@ def process(cfg: Config, *, url: str = None, path: str = None, data: bytes = Non
         "models": {c: profile["detect"][c]["model"] for c in ("face", "plate")
                    if profile["detect"].get(c)},
         "redact": profile["redact"]["mode"],
+        "output": {"bytes": len(blob), "optimized": optimized,
+                   **({"width": out_w, "height": out_h} if optimized else {})},
     }
 
     db.upsert_image(conn, sha, source_bytes, width, height, mime, kind, ref)
@@ -273,17 +294,25 @@ def _live_bytes(conn) -> int:
 
 
 def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
-    """Refuse the write when live blobs would exceed `storage.max_bytes`.
+    """Make room for `incoming` bytes under `storage.max_bytes`, or refuse.
 
-    Expired-first: overdue TTL blobs are reclaimed before refusing, so a cap
-    and a TTL together bound the disk without rejecting work. Same semantics
-    as JobQueue.prune_expired -- bounded pass, deletes are idempotent.
+    With rotation on (`storage.evict=oldest`, src/rotation.py) crossing the
+    high mark evicts the oldest objects down to the low mark -- bounded per
+    call, the reaper finishes the rest -- so new work is not refused.
+    Without it: expired TTL blobs are reclaimed first, then 507.
+    The disk guard is checked first and never rotates: what fills a disk
+    past the blob cap is the database, and that is the operator's call.
     """
     diskguard.check(cfg)
     cap = int(cfg.get("storage.max_bytes") or 0)
     if not cap:
         return
-    if _live_bytes(conn) + incoming > cap:
+    if rotation.enabled(cfg):
+        _cap, high, low = rotation.marks(cfg)
+        if _live_bytes(conn) + incoming > high:
+            rotation.evict_to(cfg, conn, blobs, max(low - incoming, 0),
+                              max_objects=rotation.INLINE_MAX_OBJECTS)
+    elif _live_bytes(conn) + incoming > cap:
         for r in db.expired_blobs(conn, 200):
             try:
                 blobs.delete(r["blob_path"])
@@ -297,7 +326,27 @@ def _check_storage_cap(cfg: Config, conn, blobs, incoming: int) -> None:
         raise StorageFull(
             f"Blob storage full: {usage + incoming} bytes would exceed the "
             f"{cap} cap", details={"usage_bytes": usage, "cap_bytes": cap,
-                                   "incoming_bytes": incoming})
+                                   "incoming_bytes": incoming,
+                                   "rotation": rotation.enabled(cfg)})
+
+
+def _put_with_room(cfg: Config, conn, blobs, rel: str, data: bytes,
+                   mime: str) -> None:
+    """Write; if the store itself is out of room (a bucket quota smaller than
+    max_bytes, or a full filesystem) rotate a growing slice -- 10%, 25%, 50%
+    of live usage -- retrying after each. blurd's accounting cannot see a
+    quota, so this is where it learns. Without rotation: 507 at once."""
+    for frac in (0.10, 0.25, 0.50, None):
+        try:
+            blobs.put(rel, data, mime)
+            return
+        except store.QuotaExceeded:
+            if frac is None or not rotation.enabled(cfg):
+                raise
+        used = _live_bytes(conn)
+        rotation.evict_to(cfg, conn, blobs,
+                          max(used - max(len(data), int(used * frac)), 0),
+                          max_objects=rotation.INLINE_MAX_OBJECTS)
 
 
 def _expires_at(profile: dict) -> Optional[str]:
@@ -358,7 +407,12 @@ def apply_regions(cfg: Config, conn, row, regions: List[dict]) -> Dict[str, Any]
     # match what the pipeline wrote originally.
     profile = json.loads(row["profile_json"]) if "profile_json" in row.keys() \
         else cfg.resolve_profile(None)
-    new_blob, new_mime, _ = encode(img, profile["output"])
+    out_cfg = dict(profile["output"])
+    opt = out_cfg.pop("optimize", None)
+    if opt:
+        # Already at the optimized size; keep its quality, never re-upscale.
+        out_cfg["quality"] = min(int(out_cfg.get("quality", 90)), opt["quality"])
+    new_blob, new_mime, _ = encode(img, out_cfg)
     thumb = _thumb(img)
     img = None
     # Object first, row second -- same ordering rule as process().
@@ -403,6 +457,8 @@ def artifact_result(cfg: Config, conn, row, cached: bool,
         "stats": _json.loads(row["stats_json"]),
         "created_at": row["created_at"],
         "expires_at": (row["expires_at"] if "expires_at" in row.keys()
+                       else None),
+        "evicted_at": (row["evicted_at"] if "evicted_at" in row.keys()
                        else None),
         "errors": [],
         "warnings": (["no detections: redaction may have missed something"]

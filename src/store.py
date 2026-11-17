@@ -35,7 +35,21 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Optional
 
-from .errors import Internal, NotFound, Upstream, ValidationError
+import errno
+
+from .errors import Internal, NotFound, StorageFull, Upstream, ValidationError
+
+
+class QuotaExceeded(StorageFull):
+    """The store itself refused the write for space: a bucket quota (MinIO,
+    Ceph RGW) or a full filesystem. Distinct from blurd's own cap so the write
+    path can rotate and retry once (pipeline._put_with_room)."""
+
+
+# Error codes S3-compatible stores use for "no room": MinIO's bucket quota,
+# Ceph RGW's user/bucket quota, and the generic storage-full answers.
+_QUOTA_MARKERS = (b"QuotaExceeded", b"XMinioAdminBucketQuotaExceeded",
+                  b"XMinioStorageFull", b"EntityTooLarge", b"InsufficientStorage")
 
 _UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 
@@ -85,11 +99,32 @@ class LocalStore:
         # made the second rename fail ENOENT after the first moved it.
         tmp = dest.with_suffix(
             f"{dest.suffix}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.part")
-        tmp.write_bytes(data)
-        tmp.replace(dest)      # atomic: readers never see a half-written blob
+        try:
+            tmp.write_bytes(data)
+            tmp.replace(dest)  # atomic: readers never see a half-written blob
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise QuotaExceeded(f"Filesystem full writing {rel}",
+                                    {"errno": exc.errno})
+            raise
 
     def delete(self, rel: str) -> None:
         (self.root / rel).unlink(missing_ok=True)
+
+    def scan(self) -> dict:
+        """Objects and bytes actually on disk under the blob root."""
+        n = total = 0
+        for dirpath, _dirs, files in os.walk(self.root):
+            for f in files:
+                if f.endswith(".part"):
+                    continue
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, f))
+                    n += 1
+                except OSError:
+                    pass
+        return {"objects": n, "bytes": total}
 
     def check(self) -> dict:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -175,6 +210,11 @@ class S3Store:
 
     def put(self, rel: str, data: bytes, content_type: str = "image/jpeg") -> None:
         status, body = self._request("PUT", self._key(rel), data, content_type)
+        if status in (400, 403, 507) and any(m in body for m in _QUOTA_MARKERS):
+            raise QuotaExceeded(
+                f"Object storage refused the write for quota ({status})",
+                {"key": self._key(rel),
+                 "body": body[:200].decode("utf-8", "replace")})
         if status not in (200, 201):
             raise Upstream(
                 f"Object storage returned {status} on PUT",
@@ -186,6 +226,54 @@ class S3Store:
         if status not in (200, 204, 404):
             raise Upstream(f"Object storage returned {status} on DELETE",
                            {"key": self._key(rel)})
+
+    def scan(self) -> dict:
+        """Count objects and bytes actually in the bucket (under the prefix),
+        via ListObjectsV2. The S3 protocol has no quota or usage call, so this
+        is the only portable way to see real usage. O(objects/1000) requests:
+        an operator check, never on a request path."""
+        import xml.etree.ElementTree as ET
+        parts = urllib.parse.urlsplit(self.endpoint)
+        if self.path_style:
+            host, path = parts.netloc, f"/{self.bucket}"
+        else:
+            host, path = f"{self.bucket}.{parts.netloc}", "/"
+        n = total = 0
+        token = None
+        while True:
+            params = {"list-type": "2", "max-keys": "1000"}
+            if self.prefix:
+                params["prefix"] = self.prefix + "/"
+            if token:
+                params["continuation-token"] = token
+            query = "&".join(f"{_quote(k)}={_quote(v)}"
+                             for k, v in sorted(params.items()))
+            headers = _sign(method="GET", host=host, path=path, body=b"",
+                            access_key=self.access_key,
+                            secret_key=self.secret_key, region=self.region,
+                            query=query)
+            url = f"{parts.scheme}://{host}{path}?{query}"
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    body = resp.read()
+            except urllib.error.HTTPError as exc:
+                raise Upstream(f"Object storage returned {exc.code} on list",
+                               {"body": exc.read()[:200].decode("utf-8", "replace")})
+            except urllib.error.URLError as exc:
+                raise Upstream(f"Object storage unreachable: {exc.reason}",
+                               {"endpoint": self.endpoint, "bucket": self.bucket})
+            root = ET.fromstring(body)
+            ns = root.tag.split("}")[0] + "}" if root.tag.startswith("{") else ""
+            for c in root.iter(f"{ns}Contents"):
+                n += 1
+                total += int(c.findtext(f"{ns}Size") or 0)
+            if (root.findtext(f"{ns}IsTruncated") or "").lower() != "true":
+                break
+            token = root.findtext(f"{ns}NextContinuationToken")
+            if not token:
+                break
+        return {"objects": n, "bytes": total}
 
     def check(self) -> dict:
         """Round-trip a probe object. A bucket that reads but cannot be written
@@ -231,12 +319,12 @@ def _hmac(key: bytes, msg: str) -> bytes:
 
 def _sign(*, method: str, host: str, path: str, body: bytes, access_key: str,
           secret_key: str, region: str, content_type: str = None,
-          service: str = "s3") -> dict:
+          service: str = "s3", query: str = "") -> dict:
     """AWS Signature Version 4, the subset needed for single-object requests.
 
-    No query parameters are ever signed here, because blurd only ever addresses
-    whole objects. If a caller adds one it must also go into the canonical query
-    string, or the signature silently stops matching.
+    `query` must already be canonical (sorted, each key and value
+    URI-encoded) and identical to what goes on the URL -- only the bucket
+    listing (`S3Store.scan`) uses one; object requests carry none.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
@@ -251,7 +339,7 @@ def _sign(*, method: str, host: str, path: str, body: bytes, access_key: str,
     signed_headers = ";".join(sorted(headers))
     canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted(headers))
     canonical_request = "\n".join(
-        [method, path, "", canonical_headers, signed_headers, payload_hash])
+        [method, path, query, canonical_headers, signed_headers, payload_hash])
 
     scope = f"{date_stamp}/{region}/{service}/aws4_request"
     to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope,

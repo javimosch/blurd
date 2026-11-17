@@ -12,20 +12,25 @@ not open the dashboard.
 |---|---|---|
 | list keys (id, name, prefix, created, last used, status) | always | operational hygiene; the listing never contains a usable key, only its prefix |
 | **revoke** a key | always | fail-safe: the worst outcome of a compromise or a mistake is denial of service, never granted access — and revocation is the thing you need to do fast, during an incident, from wherever you are |
-| **create** a key | opt-in, plus a second secret | a minted key **outlives the dashboard password**. Allowing creation makes one shared, human-typed, browser-entered secret the root of trust for permanent machine access |
+| **create** a key | on by default since 0.23; optional second secret | a minted key **outlives the dashboard password**. Set `BLURD_DASHBOARD_KEY_SECRET` to require a second secret per mint, or `BLURD_DASHBOARD_ALLOW_KEY_CREATION=false` to forbid minting |
+| **rename** a key | always | cosmetic; audited as `key.rename` |
+| **remove** a key | revoked keys only | an active key must be revoked first, so a delete can never silently cut a caller off; audited as `key.purge` |
+| edit **scope limits** | always | per-scope max input size, optimize floor, retention (spec/storage.md); audited as `scope_policy.set/unset` |
 
-Enable creation explicitly:
+Before 0.23 creation was opt-in. It is now on by default; to require a second
+secret, or to turn it off:
 
 ```bash
-blurd dashboard-keys enable --secret <admin-secret>   # must differ from the
+blurd dashboard-keys enable --secret <admin-secret>   # optional; must differ from the
                                                       # dashboard password,
                                                       # min 12 chars
 blurd dashboard-keys status
 blurd dashboard-keys disable
 ```
 
-With it enabled, minting still requires the `X-Blurd-Admin-Secret` header, so
-compromising the dashboard login alone is not sufficient. The plaintext key is
+With a secret set, minting requires the `X-Blurd-Admin-Secret` header, so
+compromising the dashboard login alone is not sufficient. Without one, the
+dashboard login is the root of trust for minting -- the 0.23 default. The plaintext key is
 returned exactly once; only its sha256 is stored.
 
 ## CSRF

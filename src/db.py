@@ -101,6 +101,14 @@ def artifact_expired(row) -> bool:
     return ("expires_at" in row.keys() and bool(row["expires_at"])
             and row["expires_at"] <= db_sql.now())
 
+def expiry_detail(row) -> dict:
+    """410 details: when the bytes went, and why -- "evicted" by rotation
+    (storage.evict) or "ttl". Works on a sqlite3.Row, a dict or a record."""
+    keys = row.keys()
+    ev = row["evicted_at"] if "evicted_at" in keys else None
+    return {"expired_at": row["expires_at"] if "expires_at" in keys else None,
+            "reason": "evicted" if ev else "ttl"}
+
 __all__ = sorted(_DISPATCHED + list(_SHARED) +
-                 ["SORTS", "JOB_SORTS", "COUNT_CAP", "STATS_TTL",
+                 ["SORTS", "JOB_SORTS", "expiry_detail", "COUNT_CAP", "STATS_TTL",
                   "INSTANCE_STALE_SECONDS"])

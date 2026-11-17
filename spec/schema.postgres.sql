@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   manual_regions TEXT NOT NULL DEFAULT '[]', -- operator-drawn boxes, normalized coords
   created_at    TEXT NOT NULL,
   expires_at    TEXT,                     -- NULL = kept forever
+  evicted_at    TEXT,                     -- set when rotation (storage.evict) removed the blob
   UNIQUE (source_sha, profile_hash)
 );
 
@@ -114,6 +115,9 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_source    ON artifacts(source_sha);
 CREATE INDEX IF NOT EXISTS idx_artifacts_created   ON artifacts(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_review    ON artifacts(needs_review);
 CREATE INDEX IF NOT EXISTS idx_artifacts_expires   ON artifacts(expires_at);
+-- Rotation walks live blobs oldest-first; the partial index keeps that
+-- seek O(batch) however many evicted rows precede it (added in 0.23.0).
+CREATE INDEX IF NOT EXISTS idx_artifacts_live_created ON artifacts(created_at, id) WHERE blob_path != '';
 CREATE INDEX IF NOT EXISTS idx_tags_tag            ON tags(tenant, tag);
 CREATE INDEX IF NOT EXISTS idx_metadata_kv         ON metadata(tenant, key, value);
 

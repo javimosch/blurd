@@ -569,12 +569,15 @@ async function loadKeys() {
   const el = $("keys");
   try {
     const d = await api("/keys");
+    const secretField = d.creation_requires_secret
+      ? `<div><label>admin secret</label>
+           <input id="k-secret" type="password" placeholder="BLURD_DASHBOARD_KEY_SECRET"></div>`
+      : "";
     const gate = d.creation_enabled
       ? `<div class="mintbox">
            <div><label>name</label>
              <input id="k-name" placeholder="photo-ingest"></div>
-           <div><label>admin secret</label>
-             <input id="k-secret" type="password" placeholder="not the dashboard password"></div>
+           ${secretField}
            <div><label>scope: tags (optional, comma separated)</label>
              <input id="k-stags" placeholder="acme"></div>
            <div><label>scope: metadata (optional, k=v)</label>
@@ -588,22 +591,21 @@ async function loadKeys() {
            unique codes live in their own namespace — so two apps can both use
            <code>IMG_0042.jpg</code> — and it can neither see nor label another
            tenant's images. Leave both blank for an unrestricted key.
+           Limits (size, optimization, retention) are set per scope below.
          </div>`
       : `<div class="notice">
-           <b>Minting keys here is disabled.</b> A minted key outlives the
-           dashboard password, so letting one shared browser login create
-           permanent API access is opt-in.<br>
-           Enable it with <code>blurd dashboard-keys enable --secret &lt;secret&gt;</code>
-           — creation then also requires that second secret.<br>
-           <b>Revoking</b> is always available below: it is fail-safe, and it is
-           the thing you want to be able to do quickly.
+           <b>Minting keys here is disabled</b> on this instance
+           (<code>BLURD_DASHBOARD_ALLOW_KEY_CREATION=false</code>).
+           Rename, revoke and remove still work below.
          </div>`;
     el.innerHTML = gate + '<div id="k-new"></div>' + `
       <table><thead><tr><th>id</th><th>name</th><th>scope</th><th>prefix</th>
         <th>created</th><th>last used</th><th>status</th><th></th></tr></thead><tbody>` +
       d.keys.map((k) => `<tr class="${k.revoked ? "revoked" : ""}">
         <td class="id">${esc(k.id)}</td>
-        <td class="code">${esc(k.name)}</td>
+        <td class="code">${esc(k.name)}
+          <button class="ghost rename" data-id="${esc(k.id)}" data-name="${esc(k.name)}"
+                  title="rename">✎</button></td>
         <td>${k.scope ? `<span class="pill">${esc(k.scope_description)}</span>`
                       : '<span style="color:var(--dim)">unrestricted</span>'}</td>
         <td>${esc(k.prefix)}…</td>
@@ -611,10 +613,13 @@ async function loadKeys() {
         <td>${esc(k.last_used || "never")}</td>
         <td><span class="st ${k.revoked ? "failed" : "live"}">${
               k.revoked ? "revoked" : "active"}</span></td>
-        <td>${k.revoked ? "" :
-              `<button class="ghost revoke" data-id="${esc(k.id)}"
+        <td>${k.revoked
+              ? `<button class="ghost purge" data-id="${esc(k.id)}"
+                         data-name="${esc(k.name)}">remove</button>`
+              : `<button class="ghost revoke" data-id="${esc(k.id)}"
                        data-name="${esc(k.name)}">revoke</button>`}</td>
-      </tr>`).join("") + "</tbody></table>";
+      </tr>`).join("") + "</tbody></table>" + '<div id="k-policies"></div>';
+    loadScopePolicies();
 
     try {
       const log = await api("/audit?limit=25");
@@ -644,10 +649,30 @@ async function loadKeys() {
       };
     });
 
+    el.querySelectorAll(".purge").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm(`Remove revoked key "${b.dataset.name}" from the list? The audit trail keeps its history.`)) return;
+        try { await api(`/keys/${b.dataset.id}?purge=1`, { method: "DELETE" }); loadKeys(); }
+        catch (err) { alert(err.message); }
+      };
+    });
+    el.querySelectorAll(".rename").forEach((b) => {
+      b.onclick = async () => {
+        const name = prompt("New name for this key", b.dataset.name);
+        if (!name || name.trim() === b.dataset.name) return;
+        try {
+          await api(`/keys/${b.dataset.id}`, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name.trim() }) });
+          loadKeys();
+        } catch (err) { alert(err.message); }
+      };
+    });
+
     const mint = $("k-mint");
     if (mint) mint.onclick = async () => {
       const name = $("k-name").value.trim();
-      const secret = $("k-secret").value;
+      const secret = $("k-secret") ? $("k-secret").value : "";
       if (!name) { alert("give the key a name"); return; }
       const stags = $("k-stags").value.split(",").map(s => s.trim()).filter(Boolean);
       const smeta = {};
@@ -661,8 +686,8 @@ async function loadKeys() {
       try {
         const k = await api("/keys", {
           method: "POST",
-          headers: { "Content-Type": "application/json",
-                     "X-Blurd-Admin-Secret": secret },
+          headers: Object.assign({ "Content-Type": "application/json" },
+                                 secret ? { "X-Blurd-Admin-Secret": secret } : {}),
           body: JSON.stringify(scope ? { name, scope } : { name }),
         });
         // Shown once. It is never stored in plaintext, so there is no second
@@ -677,7 +702,7 @@ async function loadKeys() {
           <button class="ghost" id="k-hide">done</button></div>`;
         $("k-copy").onclick = () => navigator.clipboard?.writeText(k.key);
         $("k-hide").onclick = () => loadKeys();
-        $("k-name").value = ""; $("k-secret").value = "";
+        $("k-name").value = ""; if ($("k-secret")) $("k-secret").value = "";
         $("k-stags").value = ""; $("k-smeta").value = "";
         const rows = await api("/keys");
         void rows;
@@ -688,6 +713,86 @@ async function loadKeys() {
     };
   } catch (err) {
     el.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
+/* Per-scope limits: one row per scope that has a key or a policy. Values
+   here are FLOORS -- a request can tighten them, never loosen them. */
+async function loadScopePolicies() {
+  const box = $("k-policies");
+  if (!box) return;
+  const mb = (n) => (n ? +(n / 1e6).toFixed(2) : "");
+  const hours = (n) => (n ? +(n / 3600).toFixed(2) : "");
+  try {
+    const d = await api("/scope-policies");
+    const lim = d.optimize_limits;
+    const num = (cls, v, ph, extra = "") =>
+      `<input class="${cls}" type="number" step="any" min="0" value="${v}"
+              placeholder="${ph}" style="width:84px" ${extra}>`;
+    box.innerHTML = `
+      <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                 color:var(--dim);margin:26px 0 8px">scope limits</h3>
+      <div class="notice" style="border-left-color:var(--accent)">
+        Limits apply to every key of a scope and to every replica at once.
+        A request may make them <b>stricter</b> (smaller size, earlier
+        optimization, shorter retention) but never looser: e.g. with
+        "optimize above 3 MB", a request may ask for 2 MB, not 4 MB.
+        Empty = no rule. Instance input limit: <b>${mb(d.instance_max_input_bytes)} MB</b>.
+      </div>
+      <table><thead><tr><th>scope</th><th>keys</th>
+        <th>max input (MB)</th><th>optimize above (MB)</th>
+        <th>max side (px)</th><th>quality</th>
+        <th>retention (h)</th><th>keep original max (h)</th><th></th></tr></thead><tbody>` +
+      (d.scopes.length ? d.scopes.map((sc) => {
+        const p = sc.policy || {}, o = p.optimize || {};
+        return `<tr data-tenant="${esc(sc.tenant)}">
+          <td><span class="pill">${esc(sc.description)}</span>
+              <div class="id" style="color:var(--dim)">${esc(sc.tenant)}</div></td>
+          <td class="code">${esc(sc.keys.join(", ") || "—")}</td>
+          <td>${num("p-max", mb(p.max_input_bytes), "—")}</td>
+          <td>${num("p-above", mb(o.above_bytes), "off")}</td>
+          <td>${num("p-side", o.max_side || "", d.optimize_defaults.max_side,
+                     `min="${lim.max_side[0]}" max="${lim.max_side[1]}"`)}</td>
+          <td>${num("p-q", o.quality || "", d.optimize_defaults.quality,
+                     `min="${lim.quality[0]}" max="${lim.quality[1]}"`)}</td>
+          <td>${num("p-ttl", hours(p.ttl), "forever")}</td>
+          <td>${num("p-keep", hours(p.max_keep_original), "instance")}</td>
+          <td style="white-space:nowrap">
+            <button class="ghost p-save">save</button>
+            ${sc.policy ? '<button class="ghost p-clear">clear</button>' : ""}</td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="9">no keys yet</td></tr>`) +
+      "</tbody></table>";
+
+    box.querySelectorAll("tr[data-tenant]").forEach((tr) => {
+      const t = tr.dataset.tenant;
+      const v = (cls) => tr.querySelector("." + cls).value.trim();
+      const toBytes = (x) => (x ? Math.round(parseFloat(x) * 1e6) : null);
+      const toSecs = (x) => (x ? Math.max(60, Math.round(parseFloat(x) * 3600)) : null);
+      tr.querySelector(".p-save").onclick = async () => {
+        const body = { max_input_bytes: toBytes(v("p-max")),
+                       ttl: toSecs(v("p-ttl")),
+                       max_keep_original: toSecs(v("p-keep")) };
+        if (v("p-above")) body.optimize = {
+          above_bytes: toBytes(v("p-above")),
+          max_side: v("p-side") ? parseInt(v("p-side"), 10) : null,
+          quality: v("p-q") ? parseInt(v("p-q"), 10) : null };
+        try {
+          await api(`/scope-policies/${t}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body) });
+          loadScopePolicies();
+        } catch (err) { alert(err.message); }
+      };
+      const clr = tr.querySelector(".p-clear");
+      if (clr) clr.onclick = async () => {
+        if (!confirm("Remove every limit for this scope?")) return;
+        try { await api(`/scope-policies/${t}`, { method: "DELETE" }); loadScopePolicies(); }
+        catch (err) { alert(err.message); }
+      };
+    });
+  } catch (err) {
+    box.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
   }
 }
 
@@ -818,8 +923,14 @@ async function loadSettings() {
         .join("") + `</div>
       <div id="s-msg"></div>
       <div id="s-detect"></div>
+      <div id="s-runtime"></div>
       <div id="s-originals"></div>`;
+    if ((p.locked || []).length) {
+      $("s-msg").innerHTML = `<div class="notice">Set by environment (read-only here):
+        <code>${esc(p.locked.join(", "))}</code>. The env value wins; change it in the deployment.</div>`;
+    }
     loadDetectSettings();
+    loadRuntimeSettings();
     loadOriginalsSettings();
     $("s-save").onclick = async () => {
       const body = {
@@ -848,8 +959,12 @@ async function loadDetectSettings() {
   try {
     const d = await api("/profile/detect");
     const L = d.limits, df = d.defaults;
+    const dlk = new Set(d.locked || []);
+    const pathOf = { "d-fs": "profile.detect.face.min_score", "d-ps": "profile.detect.plate.min_score",
+                     "d-pa": "profile.detect.plate.min_aspect", "d-pm": "profile.detect.plate.max_area" };
     const num = (id, v, lim, step, hint) =>
-      `<input id="${id}" type="number" min="${lim[0]}" max="${lim[1]}" step="${step}" value="${v ?? ""}">` +
+      `<input id="${id}" type="number" min="${lim[0]}" max="${lim[1]}" step="${step}" value="${v ?? ""}"${
+        dlk.has(pathOf[id]) ? " disabled" : ""}>` +
       `<small style="color:var(--dim)">default ${hint}</small>`;
     el.innerHTML = `
       <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
@@ -877,6 +992,12 @@ async function loadDetectSettings() {
                      plate: { min_score: parseFloat($("d-ps").value),
                               min_aspect: parseFloat($("d-pa").value || "0"),
                               max_area: parseFloat($("d-pm").value || "0") / 100 } };
+      for (const [id, path] of Object.entries(pathOf)) {
+        if (!dlk.has(path)) continue;          // env-set: not ours to send
+        const [, , cls, key] = path.split(".");
+        delete body[cls][key];
+        if (!Object.keys(body[cls]).length) delete body[cls];
+      }
       try {
         const r = await api("/profile/detect", { method: "POST", body: JSON.stringify(body) });
         $("d-msg").innerHTML = `<div class="notice">saved. new profile_hash <code>${esc(r.profile_hash)}</code>.
@@ -887,6 +1008,81 @@ async function loadDetectSettings() {
           or filter the images tab and use <b>Reprocess page</b>.</div>`;
         $("d-rp-fb-r").onclick = () => reprocessBatch({ feedback: "open", source: "retained" }, "images with open feedback");
         $("d-rp-fb-u").onclick = () => reprocessBatch({ feedback: "open", source: "source_url" }, "images with open feedback");
+      } catch (err) { alert(err.message); }
+    };
+  } catch (err) {
+    el.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
+/* Storage & defaults: instance-wide values kept in the shared database, so
+   every replica applies them within seconds. Env-set paths render read-only.
+   Scope limits (keys tab) remain the per-tenant floor on top of these. */
+async function loadRuntimeSettings() {
+  const el = $("s-runtime");
+  try {
+    const d = await api("/settings/runtime");
+    const S = d.settings, lk = new Set(d.locked);
+    const val = (p) => S[p].value;
+    const src = (p) => `<small style="color:var(--dim)">${
+      lk.has(p) ? "set by env" : S[p].source === "dashboard" ? "set here" : "default"}</small>`;
+    const dis = (p) => (lk.has(p) ? " disabled" : "");
+    const mb = (n) => (n ? +(n / 1e6).toFixed(2) : "");
+    const opt = val("profile.output.optimize") || {};
+    const inp = (id, p, v, attrs = "") =>
+      `<input id="${id}" type="number" step="any" min="0" value="${v}" ${attrs}${dis(p)}>`;
+    el.innerHTML = `
+      <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                 color:var(--dim);margin:26px 0 8px">storage &amp; defaults</h3>
+      <div class="notice">
+        Instance defaults, stored in the database and applied by every replica
+        within ${d.ttl_seconds}s. <b>Optimize</b> shrinks sources above the
+        threshold (output is always JPEG). <b>Retention</b> is how long a
+        redacted image is kept (empty = forever). <b>Rotation</b>: past the high
+        mark of the storage cap the oldest images are evicted down to the low
+        mark (images with open feedback last; records stay, reads answer 410)
+        instead of refusing with 507. Scope limits in the keys tab can only be
+        stricter than these. Empty = back to the default.
+      </div>
+      <div class="mintbox">
+        <div><label>max input (MB)</label>${inp("r-in", "fetch.max_bytes", mb(val("fetch.max_bytes")))}${src("fetch.max_bytes")}</div>
+        <div><label>optimize above (MB)</label>${inp("r-oa", "profile.output.optimize", mb(opt.above_bytes), 'placeholder="off"')}${src("profile.output.optimize")}</div>
+        <div><label>optimize max side (px)</label>${inp("r-os", "profile.output.optimize", opt.max_side || "", 'placeholder="2560"')}</div>
+        <div><label>optimize quality</label>${inp("r-oq", "profile.output.optimize", opt.quality || "", 'placeholder="82"')}</div>
+        <div><label>output quality</label>${inp("r-q", "profile.output.quality", val("profile.output.quality") ?? "")}${src("profile.output.quality")}</div>
+        <div><label>retention (hours)</label>${inp("r-ttl", "profile.storage.ttl", val("profile.storage.ttl") ? +(val("profile.storage.ttl") / 3600).toFixed(2) : "", 'placeholder="forever"')}${src("profile.storage.ttl")}</div>
+      </div>
+      <div class="mintbox">
+        <div><label>storage cap (MB)</label>${inp("r-cap", "storage.max_bytes", mb(val("storage.max_bytes")), 'placeholder="no cap"')}${src("storage.max_bytes")}</div>
+        <div><label>rotation</label><select id="r-ev"${dis("storage.evict")}>
+          ${["off", "oldest"].map((m) => `<option${m === val("storage.evict") ? " selected" : ""}>${m}</option>`).join("")}
+          </select>${src("storage.evict")}</div>
+        <div><label>high mark (%)</label>${inp("r-hi", "storage.evict_high_pct", val("storage.evict_high_pct"))}</div>
+        <div><label>low mark (%)</label>${inp("r-lo", "storage.evict_low_pct", val("storage.evict_low_pct"))}</div>
+        <button id="r-save">Save</button>
+      </div>
+      <div id="r-msg"></div>`;
+    $("r-save").onclick = async () => {
+      const v = (id) => $(id).value.trim();
+      const bytes = (x) => (x ? Math.round(parseFloat(x) * 1e6) : null);
+      const int = (x) => (x ? parseInt(x, 10) : null);
+      const body = {
+        "fetch.max_bytes": bytes(v("r-in")),
+        "profile.output.optimize": v("r-oa")
+          ? { above_bytes: bytes(v("r-oa")), max_side: int(v("r-os")), quality: int(v("r-oq")) }
+          : null,
+        "profile.output.quality": int(v("r-q")),
+        "profile.storage.ttl": v("r-ttl") ? Math.max(60, Math.round(parseFloat(v("r-ttl")) * 3600)) : null,
+        "storage.max_bytes": bytes(v("r-cap")),
+        "storage.evict": $("r-ev").value,
+        "storage.evict_high_pct": int(v("r-hi")),
+        "storage.evict_low_pct": int(v("r-lo")),
+      };
+      for (const k of Object.keys(body)) if (lk.has(k)) delete body[k];
+      try {
+        await api("/settings/runtime", { method: "POST", body: JSON.stringify(body) });
+        $("r-msg").innerHTML = '<div class="notice">saved — every replica picks it up within a few seconds.</div>';
+        loadRuntimeSettings();
       } catch (err) { alert(err.message); }
     };
   } catch (err) {

@@ -61,6 +61,29 @@ def revoke(conn, key_id: str, actor: str = "cli", source_ip: str = None) -> dict
     return {"id": key_id, "revoked": True}
 
 
+def rename(conn, key_id: str, name: str, actor: str = "cli",
+           source_ip: str = None) -> dict:
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValidationError("A key needs a name")
+    if db.rename_api_key(conn, key_id, name) == 0:
+        raise NotFound("api_key", key_id)
+    db.audit(conn, actor, "key.rename", key_id, source_ip, {"name": name})
+    conn.commit()
+    return {"id": key_id, "name": name}
+
+
+def purge(conn, key_id: str, actor: str = "cli", source_ip: str = None) -> dict:
+    if not any(r["id"] == key_id for r in db.all_api_keys(conn)):
+        raise NotFound("api_key", key_id)
+    if db.purge_api_key(conn, key_id) == 0:
+        raise Conflict("Revoke the key before removing it",
+                       {"id": key_id, "reason": "active"})
+    db.audit(conn, actor, "key.purge", key_id, source_ip)
+    conn.commit()
+    return {"id": key_id, "removed": True}
+
+
 def listing(conn) -> list:
     out = []
     for r in db.all_api_keys(conn):

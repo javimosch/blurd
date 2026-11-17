@@ -355,17 +355,26 @@ environment variable:
 | `BLURD_FETCH_MAX_BYTES` | input-size guard on every input path; default 5 MB |
 | `BLURD_STORAGE_MAX_BYTES` | cap on live redacted blobs; 0 = unlimited. Over it: expired TTL blobs are reclaimed, then writes fail `507 storage_full`. Retained originals count too |
 | `BLURD_STORAGE_MAX_DISK_PCT` | **opt-in** disk guard, 0 = off. At or above this % used on the home's filesystem, submits (and queued jobs about to write) fail `507 storage_full`; reads/deletes/sweep keep working. Only meaningful when the blob store shares that disk (local storage, or MinIO on the same host, as in `compose.coolify.yml`); with external S3 it guards blurd's own disk only |
+| `BLURD_STORAGE_EVICT` | `oldest` turns the `max_bytes` cap into rotation: past `_HIGH_PCT` (90) of the cap the oldest blobs/originals are evicted (TTL or not; images with open feedback last) down to `_LOW_PCT` (75). Evicted reads answer 410 `reason: evicted`. Default `off` (507 at the cap). The database is never rotated |
+| `BLURD_STORAGE_EVICT_HIGH_PCT` / `_LOW_PCT` | rotation watermarks, % of `max_bytes` |
 | `BLURD_STORAGE_DISK_PATH` | filesystem the guard measures; default the home. Point it at a mounted object-store volume if that is a different disk |
 | `BLURD_ORIGINALS_ENABLED` / `_MAX_TTL` / `_URL_MODE` / `_SIGN_TTL` | opt-in source retention (default off, 30 d cap, `authenticated`, 900 s); set = locked in the dashboard. See `spec/originals.md` |
 | `BLURD_ORIGINALS_SIGN_SECRET` | HMAC secret for `signed` url mode; auto-generated and shared via the database if unset |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |
 | `BLURD_DASHBOARD_USER` / `BLURD_DASHBOARD_PASSWORD` | the human dashboard only — never `/v1` |
-| `BLURD_DASHBOARD_ALLOW_KEY_CREATION` | `true` lets the dashboard mint API keys; each mint still needs `BLURD_DASHBOARD_KEY_SECRET` |
+| `BLURD_DASHBOARD_ALLOW_KEY_CREATION` | default `true` (0.23): the dashboard creates, renames, revokes and removes keys and edits scope limits. `false` forbids minting. If `BLURD_DASHBOARD_KEY_SECRET` is set, each mint also needs it |
 | `BLURD_PULL_MODELS` | fetch detector models at start |
 | `BLURD_HOST` / `BLURD_PORT` | what to listen on |
 | `BLURD_ORT_ARENA` | leave off; on costs ~40 MB/worker for no gain |
 | `BLURD_ORT_THREADS` | onnxruntime intra-op threads; 1 is right with several workers |
 | `BLURD_MALLOC_TRIM` | on by default; hands freed memory back between jobs |
+
+Since 0.23 the dashboard (Settings → storage & defaults, detection,
+redaction; Keys → scope limits) edits instance defaults stored in the **shared
+database**, so every replica applies a change within ~3 s. Precedence is
+`defaults < config.json < dashboard < env`: an env var that sets a value wins
+and the dashboard shows it read-only. Infrastructure (backends, credentials,
+sizing) stays env-only.
 
 The full list is `ENV_OVERRIDES` in `src/config.py`. Adding a setting without an
 entry there makes it unreachable in every deployment shape that matters.
