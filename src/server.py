@@ -836,6 +836,22 @@ class Handler(BaseHTTPRequestHandler):
                 "store_objects": real["objects"], "store_bytes": real["bytes"],
                 "accounted_bytes": acc, "drift_bytes": real["bytes"] - acc,
                 "scan_ms": int((time.time() - t0) * 1000)}})
+        if sub.rstrip("/") == "/storage/orphans":
+            # GET = dry-run report. POST {"classes": [...], "min_age_s": N}
+            # deletes; objects younger than min_age_s (>= 600) are never
+            # touched, because a write stores the object before its row.
+            from . import orphans as _orph
+            if self.command == "POST":
+                body = self._json_body()
+                min_age = max(int(body.get("min_age_s") or 3600), 600)
+                res = _orph.report(conn, self.server.blurd_store, min_age_s=min_age,
+                                   delete=True, classes=body.get("classes"))
+                db.audit(conn, "dashboard", "storage.orphans_delete", None,
+                         self.address_string(), res.get("deleted"))
+                conn.commit()
+            else:
+                res = _orph.report(conn, self.server.blurd_store)
+            return self._send(200, {"ok": True, "data": res})
         if sub.rstrip("/") == "/settings/runtime":
             if self.command == "POST":
                 changes = self._json_body()

@@ -112,18 +112,29 @@ class LocalStore:
     def delete(self, rel: str) -> None:
         (self.root / rel).unlink(missing_ok=True)
 
-    def scan(self) -> dict:
-        """Objects and bytes actually on disk under the blob root."""
-        n = total = 0
+    def iter_objects(self):
+        """Every object under the blob root: {key (rel), size, last_modified}."""
+        import datetime as _dt
         for dirpath, _dirs, files in os.walk(self.root):
             for f in files:
                 if f.endswith(".part"):
                     continue
+                full = os.path.join(dirpath, f)
                 try:
-                    total += os.path.getsize(os.path.join(dirpath, f))
-                    n += 1
+                    st = os.stat(full)
                 except OSError:
-                    pass
+                    continue
+                yield {"key": os.path.relpath(full, self.root).replace(os.sep, "/"),
+                       "size": st.st_size,
+                       "last_modified": _dt.datetime.fromtimestamp(
+                           st.st_mtime, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    def scan(self) -> dict:
+        """Objects and bytes actually on disk under the blob root."""
+        n = total = 0
+        for o in self.iter_objects():
+            n += 1
+            total += o["size"]
         return {"objects": n, "bytes": total}
 
     def check(self) -> dict:
@@ -227,7 +238,7 @@ class S3Store:
             raise Upstream(f"Object storage returned {status} on DELETE",
                            {"key": self._key(rel)})
 
-    def scan(self) -> dict:
+    def iter_objects(self):
         """Count objects and bytes actually in the bucket (under the prefix),
         via ListObjectsV2. The S3 protocol has no quota or usage call, so this
         is the only portable way to see real usage. O(objects/1000) requests:
@@ -238,8 +249,8 @@ class S3Store:
             host, path = parts.netloc, f"/{self.bucket}"
         else:
             host, path = f"{self.bucket}.{parts.netloc}", "/"
-        n = total = 0
         token = None
+        strip = (self.prefix + "/") if self.prefix else ""
         while True:
             params = {"list-type": "2", "max-keys": "1000"}
             if self.prefix:
@@ -266,13 +277,23 @@ class S3Store:
             root = ET.fromstring(body)
             ns = root.tag.split("}")[0] + "}" if root.tag.startswith("{") else ""
             for c in root.iter(f"{ns}Contents"):
-                n += 1
-                total += int(c.findtext(f"{ns}Size") or 0)
+                key = c.findtext(f"{ns}Key") or ""
+                yield {"key": key[len(strip):] if strip and key.startswith(strip) else key,
+                       "size": int(c.findtext(f"{ns}Size") or 0),
+                       "last_modified": (c.findtext(f"{ns}LastModified") or "")[:19] + "Z"}
             if (root.findtext(f"{ns}IsTruncated") or "").lower() != "true":
                 break
             token = root.findtext(f"{ns}NextContinuationToken")
             if not token:
                 break
+        return
+
+    def scan(self) -> dict:
+        """Objects and bytes actually in the bucket (see iter_objects)."""
+        n = total = 0
+        for o in self.iter_objects():
+            n += 1
+            total += o["size"]
         return {"objects": n, "bytes": total}
 
     def check(self) -> dict:

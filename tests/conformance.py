@@ -473,6 +473,13 @@ def main():
               s == 200 and {"store_bytes", "accounted_bytes", "drift_bytes"} <= set(sc),
               f"got {s}/{sorted(sc)}")
 
+        s, b, _ = http_raw(f"{a.url}/ui-api/storage/orphans", headers={"Authorization": basic})
+        orp = json.loads(b or b"{}").get("data") or {}
+        check("the orphan report is a dry run and accounts for every object",
+              s == 200 and orp.get("dry_run") is True
+              and orp["total"]["objects"] == orp["referenced"]["objects"] + orp["orphans"]["objects"],
+              f"got {s}/{ {k: orp.get(k) for k in ('dry_run', 'total', 'orphans')} }")
+
         s, b, _ = http_raw(f"{a.url}/ui-api/audit", headers={"Authorization": basic})
         check("audit trail is readable from the dashboard", s == 200, f"got {s}")
 

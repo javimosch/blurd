@@ -126,10 +126,14 @@ COMMANDS
   models list | models pull [NAME|--all]
   config get <key> | config set <key> <value>
   storage show | storage check | storage scan | storage rotate
+  storage orphans [--delete --min-age S --class C]
                               Inspect the blob backend, round-trip a probe
                               object, compare real store usage (S3 listing or
                               disk walk) with blurd's accounting, or run one
-                              rotation pass now.
+                              rotation pass now. `orphans` reports objects no
+                              row points at (tombstoned, superseded,
+                              image_deleted, original_pruned); dry-run unless
+                              --delete, never younger than --min-age (3600 s).
   scope-policy list | set | unset
                               Per-scope ingest rules (shared DB, all replicas):
                               set (--tenant T | --scope-tag X [--scope-meta K=V])
@@ -400,7 +404,7 @@ def as_json() -> dict:
             "feedback": "Send feedback to this deployment and the shared relay",
             "models": "list | pull detector models",
             "config": "get | set configuration values",
-            "storage": "show | check | scan | rotate the blob backend",
+            "storage": "show | check | scan | rotate | orphans for the blob backend",
             "scope-policy": "list | set | unset per-scope ingest rules",
             "migrate-blobs": "Copy blobs between storage backends",
             "vacuum": "Reclaim free database pages (blocking)",

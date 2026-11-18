@@ -205,6 +205,16 @@ def build_parser() -> argparse.ArgumentParser:
                                 "(lists the bucket; an operator check)")
     sts.add_parser("rotate", help="Run one rotation pass now "
                                   "(storage.evict=oldest)")
+    so = sts.add_parser("orphans", help="Objects no database row points at "
+                                        "(dry-run unless --delete)")
+    so.add_argument("--delete", action="store_true",
+                    help="Delete them (only objects older than --min-age)")
+    so.add_argument("--min-age", type=int, default=3600, metavar="SECONDS",
+                    help="Never touch objects younger than this (default 3600)")
+    so.add_argument("--class", dest="classes", action="append", default=None,
+                    choices=["tombstoned", "superseded", "image_deleted",
+                             "original_pruned"],
+                    help="Restrict deletion to these classes (repeatable)")
 
     sp = sub.add_parser("scope-policy",
                         help="Per-scope ingest rules: max input size, forced optimization")
@@ -429,6 +439,26 @@ def run(args, out: Out) -> int:
     if cmd == "storage":
         from . import store as _store
         blobs = _store.build(cfg)
+        if args.storage_cmd == "orphans":
+            from . import db as _db, orphans as _orph
+            conn = _db.connect(cfg.db_file)
+            res = _orph.report(conn, blobs, min_age_s=args.min_age,
+                               delete=args.delete, classes=args.classes)
+            if args.delete:
+                _db.audit(conn, "cli", "storage.orphans_delete", None, None,
+                          res.get("deleted"))
+                conn.commit()
+            gb = lambda b: f"{b / 1e9:.3f} GB"
+            out.emit(res, human_lines=[
+                f"backend      {res['backend']}  ({'DRY RUN' if res['dry_run'] else 'DELETED'})",
+                f"store        {res['total']['objects']} objects, {gb(res['total']['bytes'])}",
+                f"referenced   {res['referenced']['objects']} objects, {gb(res['referenced']['bytes'])}",
+                f"orphans      {res['orphans']['objects']} objects, {gb(res['orphans']['bytes'])}",
+                *[f"  {c:<16} {v['objects']:>7}  {gb(v['bytes'])}"
+                  for c, v in res["classes"].items()],
+                f"missing      {res['missing_objects']['count']} rows point at no object",
+            ])
+            return EXIT_SUCCESS
         if args.storage_cmd in ("scan", "rotate"):
             from . import db as _db, rotation as _rot
             conn = _db.connect(cfg.db_file)

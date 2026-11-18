@@ -786,6 +786,21 @@ def artifact_blob_paths(conn, sha: str) -> List[str]:
         (sha,))]
 
 
+def storage_refs(conn) -> Dict[str, list]:
+    """Everything that can point at a stored object, for the orphan report
+    (src/orphans.py). Whole tables on purpose: an operator check, not a
+    request path."""
+    return {
+        "artifacts": [dict(r) for r in conn.execute(
+            "SELECT source_sha, profile_hash, blob_path, expires_at, evicted_at "
+            "FROM artifacts").fetchall()],
+        "originals": [dict(r) for r in conn.execute(
+            "SELECT source_sha, blob_path FROM originals").fetchall()],
+        "images": [r["source_sha"] for r in conn.execute(
+            "SELECT source_sha FROM images").fetchall()],
+    }
+
+
 def all_blob_paths(conn) -> List[str]:
     return [r["blob_path"] for r in conn.execute(
         "SELECT blob_path FROM artifacts WHERE blob_path!=''")]

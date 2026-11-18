@@ -444,6 +444,23 @@ def artifact_blob_paths(conn, sha: str) -> List[str]:
                 {"source_sha": sha, "blob_path": {"$ne": ""}}, {"blob_path": 1})]
 
 
+def storage_refs(conn) -> Dict[str, list]:
+    """See db_sql.storage_refs."""
+    return {
+        "artifacts": [{"source_sha": d.get("source_sha"),
+                       "profile_hash": d.get("profile_hash"),
+                       "blob_path": d.get("blob_path") or "",
+                       "expires_at": d.get("expires_at"),
+                       "evicted_at": d.get("evicted_at")}
+                      for d in conn.db["artifacts"].find(
+                          {}, {"source_sha": 1, "profile_hash": 1, "blob_path": 1,
+                               "expires_at": 1, "evicted_at": 1})],
+        "originals": [{"source_sha": d["_id"], "blob_path": d.get("blob_path") or ""}
+                      for d in conn.db["originals"].find({}, {"blob_path": 1})],
+        "images": [d["_id"] for d in conn.db["images"].find({}, {"_id": 1})],
+    }
+
+
 def all_blob_paths(conn) -> List[str]:
     return [d["blob_path"] for d in conn.db["artifacts"].find(
         {"blob_path": {"$ne": ""}}, {"blob_path": 1})]
