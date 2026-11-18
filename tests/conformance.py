@@ -467,6 +467,12 @@ def main():
         s, b, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
                            headers=authed, body=b'{"storage.evict": null}')
 
+        s, b, _ = http_raw(f"{a.url}/ui-api/storage/scan", headers={"Authorization": basic})
+        sc = json.loads(b or b"{}").get("data") or {}
+        check("the dashboard can scan real store usage against the accounting",
+              s == 200 and {"store_bytes", "accounted_bytes", "drift_bytes"} <= set(sc),
+              f"got {s}/{sorted(sc)}")
+
         s, b, _ = http_raw(f"{a.url}/ui-api/audit", headers={"Authorization": basic})
         check("audit trail is readable from the dashboard", s == 200, f"got {s}")
 

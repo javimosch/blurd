@@ -250,9 +250,34 @@ async function loadStats() {
       ["images", s.images], ["artifacts", s.artifacts],
       ["faces", s.faces], ["plates", s.plates],
       ["needs review", s.needs_review],
-      ["stored", (s.bytes_stored / 1048576).toFixed(1) + " MB"],
-    ].map(([k, v]) => `<div>${k} <b>${v}</b></div>`).join("") + diskCounter(s);
+    ].map(([k, v]) => `<div>${k} <b>${v}</b></div>`).join("") +
+      storageCounter(s) + diskCounter(s);
   } catch (_) { /* header counters are cosmetic */ }
+}
+
+// Live images + kept originals (blurd's own accounting: local disk or S3)
+// against the storage cap, with the rotation state. Without rotation, the
+// cap refuses work (507) -- warn as it gets close.
+function storageCounter(s) {
+  if (s.storage_used_bytes === undefined) return "";
+  const gb = (b) => (b / 1e9).toFixed(2);
+  const used = s.storage_used_bytes, cap = s.storage_max_bytes;
+  const rot = s.storage_rotation || {};
+  if (!cap) {
+    return `<div title="no storage cap: Settings → storage & defaults">storage <b>${gb(used)} GB</b> · no cap</div>`;
+  }
+  const pct = Math.round((used / cap) * 100);
+  const over = !rot.enabled && used >= cap;
+  const near = !rot.enabled && pct >= 90;
+  const mode = rot.enabled
+    ? `rotation ${Math.round(rot.high_bytes / cap * 100)}→${Math.round(rot.low_bytes / cap * 100)}%`
+    : "no rotation";
+  const title = rot.enabled
+    ? `past ${gb(rot.high_bytes)} GB the oldest images are evicted down to ${gb(rot.low_bytes)} GB`
+    : `at ${gb(cap)} GB new work is refused (507); enable rotation to evict the oldest instead`;
+  return `<div class="disk${over ? " over" : near ? " near" : ""}" title="${esc(title)}">` +
+    `storage <b>${gb(used)} / ${gb(cap)} GB</b> (${pct}%) · ${mode}` +
+    (over ? " · <b>REFUSING WORK</b>" : "") + `</div>`;
 }
 
 // Disk of the home volume, with the opt-in guard threshold if one is set.
@@ -1031,7 +1056,25 @@ async function loadRuntimeSettings() {
     const opt = val("profile.output.optimize") || {};
     const inp = (id, p, v, attrs = "") =>
       `<input id="${id}" type="number" step="any" min="0" value="${v}" ${attrs}${dis(p)}>`;
-    el.innerHTML = `
+    const st = await api("/stats");
+    const g = (b) => (b / 1e9).toFixed(3) + " GB";
+    const dk = st.disk || {};
+    const rotS = st.storage_rotation || {};
+    const usage = `
+      <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+                 color:var(--dim);margin:26px 0 8px">storage usage</h3>
+      <table><tbody>
+        <tr><td>images + kept originals (blurd's accounting)</td><td class="code">${g(st.storage_used_bytes || 0)}</td></tr>
+        <tr><td>storage cap</td><td class="code">${st.storage_max_bytes ? g(st.storage_max_bytes) : "none"}</td></tr>
+        <tr><td>rotation</td><td class="code">${rotS.enabled
+          ? `on · evicts past ${g(rotS.high_bytes)} down to ${g(rotS.low_bytes)}` : "off"}</td></tr>
+        <tr><td>server disk (${esc(dk.path || "home")})</td><td class="code">${dk.total_bytes
+          ? `${dk.used_pct}% used · ${g(dk.free_bytes)} free of ${g(dk.total_bytes)}${
+              dk.max_pct ? ` · new work refused at ${dk.max_pct}%` : " · no disk guard"}` : "n/a"}</td></tr>
+        <tr><td>real usage in the store <small style="color:var(--dim)">(lists the bucket / walks the disk)</small></td>
+            <td class="code"><span id="r-scan-out">—</span> <button class="ghost" id="r-scan">scan</button></td></tr>
+      </tbody></table>`;
+    el.innerHTML = usage + `
       <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
                  color:var(--dim);margin:26px 0 8px">storage &amp; defaults</h3>
       <div class="notice">
@@ -1062,7 +1105,16 @@ async function loadRuntimeSettings() {
         <button id="r-save">Save</button>
       </div>
       <div id="r-msg"></div>`;
-    $("r-save").onclick = async () => {
+    $("r-scan").onclick = async () => {
+      $("r-scan-out").textContent = "scanning…";
+      try {
+        const r = await api("/storage/scan");
+        $("r-scan-out").textContent = `${r.backend}: ${g(r.store_bytes)} in ${r.store_objects} objects` +
+          ` · drift ${r.drift_bytes >= 0 ? "+" : ""}${(r.drift_bytes / 1e6).toFixed(1)} MB vs accounting` +
+          ` · ${r.scan_ms} ms`;
+      } catch (err) { $("r-scan-out").textContent = err.message; }
+    };
+    const collect = () => {
       const v = (id) => $(id).value.trim();
       const bytes = (x) => (x ? Math.round(parseFloat(x) * 1e6) : null);
       const int = (x) => (x ? parseInt(x, 10) : null);
@@ -1079,6 +1131,17 @@ async function loadRuntimeSettings() {
         "storage.evict_low_pct": int(v("r-lo")),
       };
       for (const k of Object.keys(body)) if (lk.has(k)) delete body[k];
+      return body;
+    };
+    // Only what was edited: saving must not pin untouched defaults into the
+    // database (they would then stop following a changed default or env).
+    const initial = collect();
+    $("r-save").onclick = async () => {
+      const all = collect(), body = {};
+      for (const k of Object.keys(all)) {
+        if (JSON.stringify(all[k]) !== JSON.stringify(initial[k])) body[k] = all[k];
+      }
+      if (!Object.keys(body).length) { $("r-msg").innerHTML = '<div class="notice">nothing changed.</div>'; return; }
       try {
         await api("/settings/runtime", { method: "POST", body: JSON.stringify(body) });
         $("r-msg").innerHTML = '<div class="notice">saved — every replica picks it up within a few seconds.</div>';

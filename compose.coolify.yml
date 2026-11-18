@@ -41,15 +41,19 @@ services:
       BLURD_DASHBOARD_USER: ${BLURD_DASHBOARD_USER:-admin}
       BLURD_DASHBOARD_PASSWORD: ${BLURD_DASHBOARD_PASSWORD}
       BLURD_DASHBOARD_KEY_SECRET: ${BLURD_DASHBOARD_KEY_SECRET}
-      # Mint API keys from the dashboard; each mint still asks for the key secret.
+      # Mint API keys from the dashboard; when BLURD_DASHBOARD_KEY_SECRET is set,
+      # each mint also asks for it.
       BLURD_DASHBOARD_ALLOW_KEY_CREATION: ${BLURD_DASHBOARD_ALLOW_KEY_CREATION:-true}
-      BLURD_STORAGE_MAX_BYTES: ${BLURD_STORAGE_MAX_BYTES:-21474836480}
+      # Empty = the dashboard (Settings -> storage & defaults) controls the cap,
+      # stored in the database. A value here wins and locks the field.
+      BLURD_STORAGE_MAX_BYTES: ${BLURD_STORAGE_MAX_BYTES:-}
       # Disk guard (spec/storage.md): refuse new work at 90% used. Valid here
       # because blurd-home and minio-data are volumes on the same VM disk.
       BLURD_STORAGE_MAX_DISK_PCT: ${BLURD_STORAGE_MAX_DISK_PCT:-90}
-      # Rotation (spec/storage.md): "oldest" evicts the oldest blobs past 90%
-      # of STORAGE_MAX_BYTES instead of answering 507. Off until decided.
-      BLURD_STORAGE_EVICT: ${BLURD_STORAGE_EVICT:-off}
+      # Rotation (spec/storage.md): empty = dashboard-controlled (default off).
+      # "oldest" here evicts the oldest blobs past the high mark of the cap
+      # instead of answering 507, and locks the field in the dashboard.
+      BLURD_STORAGE_EVICT: ${BLURD_STORAGE_EVICT:-}
       # Opt-in original retention (spec/originals.md). Empty = not pinned, so
       # the dashboard settings tab controls it; any value set here locks it.
       BLURD_ORIGINALS_ENABLED: ${BLURD_ORIGINALS_ENABLED:-}

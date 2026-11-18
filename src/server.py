@@ -823,6 +823,19 @@ class Handler(BaseHTTPRequestHandler):
                 "locked": [p for p in runtime._env_locked_paths()
                            if p.startswith("profile.redact") or
                            p == "allowed_redact_modes"]}})
+        if sub.rstrip("/") == "/storage/scan":
+            # Real usage in the store (S3 ListObjectsV2, or a disk walk) next
+            # to blurd's own accounting. On demand only: O(objects / 1000)
+            # requests against a bucket, never on a hot path.
+            from . import rotation as _rot
+            t0 = time.time()
+            real = self.server.blurd_store.scan()
+            acc = _rot.usage(conn)
+            return self._send(200, {"ok": True, "data": {
+                "backend": self.server.blurd_store.kind,
+                "store_objects": real["objects"], "store_bytes": real["bytes"],
+                "accounted_bytes": acc, "drift_bytes": real["bytes"] - acc,
+                "scan_ms": int((time.time() - t0) * 1000)}})
         if sub.rstrip("/") == "/settings/runtime":
             if self.command == "POST":
                 changes = self._json_body()
