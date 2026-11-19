@@ -134,6 +134,9 @@ COMMANDS
                               row points at (tombstoned, superseded,
                               image_deleted, original_pruned); dry-run unless
                               --delete, never younger than --min-age (3600 s).
+                              A background check refreshes the same report
+                              every storage.orphan_check_hours (24) for the
+                              dashboard badge; deleting always needs a human.
   scope-policy list | set | unset
                               Per-scope ingest rules (shared DB, all replicas):
                               set (--tenant T | --scope-tag X [--scope-meta K=V])

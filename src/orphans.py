@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import time
 from typing import Any, Dict, Iterable, Optional
 
 from . import db
@@ -97,6 +98,8 @@ def report(conn, store, min_age_s: int = 3600, delete: bool = False,
              for c in CLASSES}
     total = {"objects": 0, "bytes": 0}
     referenced = {"objects": 0, "bytes": 0}
+    young = {"objects": 0, "bytes": 0}
+    t0 = time.time()
     deleted = {"objects": 0, "bytes": 0, "skipped_young": 0, "errors": 0}
     refs = db.storage_refs(conn)
     live = live_keys(refs)
@@ -109,6 +112,16 @@ def report(conn, store, min_age_s: int = 3600, delete: bool = False,
             referenced["objects"] += 1
             referenced["bytes"] += o["size"]
             continue
+        ts = _parse_ts(o.get("last_modified") or "")
+        if ts is None or (now - ts).total_seconds() < min_age_s:
+            # Possibly a write in flight (object stored, row not yet): not an
+            # orphan yet, and never reported as one -- so the report a human
+            # confirms is exactly what a delete would remove.
+            young["objects"] += 1
+            young["bytes"] += o["size"]
+            if delete and cls in want:
+                deleted["skipped_young"] += 1
+            continue
         st = stats[cls]
         st["objects"] += 1
         st["bytes"] += o["size"]
@@ -120,10 +133,6 @@ def report(conn, store, min_age_s: int = 3600, delete: bool = False,
             st["sample"].append({"key": o["key"], "size": o["size"],
                                  "last_modified": o.get("last_modified")})
         if delete and cls in want:
-            ts = _parse_ts(o.get("last_modified") or "")
-            if ts is None or (now - ts).total_seconds() < min_age_s:
-                deleted["skipped_young"] += 1
-                continue
             try:
                 store.delete(o["key"])
                 deleted["objects"] += 1
@@ -135,6 +144,7 @@ def report(conn, store, min_age_s: int = 3600, delete: bool = False,
     out = {"backend": store.kind, "dry_run": not delete,
            "min_age_s": min_age_s, "total": total, "referenced": referenced,
            "orphans": {"objects": orphan_objects, "bytes": orphan_bytes},
+           "young": young,
            "accounted_bytes": db.live_blob_bytes(conn) + db.live_original_bytes(conn),
            # The reverse problem: a row pointing at an object that is not
            # there (a broken record -- rule 22 exists to prevent it).
@@ -146,4 +156,56 @@ def report(conn, store, min_age_s: int = 3600, delete: bool = False,
     if delete:
         out["deleted"] = deleted
         out["delete_classes"] = sorted(want)
+    out["checked_at"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    out["scan_ms"] = int((time.time() - t0) * 1000)
     return out
+
+
+# --- cached report + background check ------------------------------------------
+# The dashboard badge reads the LAST report from the shared settings row instead
+# of listing the bucket on every page load. One replica refreshes it every
+# `storage.orphan_check_hours`; a claim row keeps N replicas from all listing
+# the same bucket at once (a lost race only costs a duplicate read-only scan).
+
+SETTING = "orphans_report"
+CLAIM = "orphans_check_claim"
+CLAIM_TTL_S = 3600
+
+
+def latest(conn) -> Optional[Dict[str, Any]]:
+    return db.settings_all(conn).get(SETTING)
+
+
+def save(conn, res: Dict[str, Any], by: str = "dashboard") -> Dict[str, Any]:
+    keep = {k: res[k] for k in ("backend", "min_age_s", "total", "referenced",
+                                "orphans", "young", "missing_objects", "classes",
+                                "checked_at", "scan_ms") if k in res}
+    keep["checked_by"] = by
+    db.setting_put(conn, SETTING, keep)
+    conn.commit()
+    return keep
+
+
+def _age_s(ts: Optional[str], now: _dt.datetime) -> float:
+    t = _parse_ts(ts or "")
+    return float("inf") if t is None else (now - t).total_seconds()
+
+
+def check_due(cfg, conn, store, instance_id: str = "") -> Optional[Dict[str, Any]]:
+    """Refresh the cached report when it is older than the interval. Never
+    deletes anything. Returns the new report, or None when not due."""
+    hours = int(cfg.get("storage.orphan_check_hours", 24) or 0)
+    if hours <= 0:
+        return None
+    now = _dt.datetime.now(_dt.timezone.utc)
+    settings = db.settings_all(conn)
+    last = settings.get(SETTING) or {}
+    if _age_s(last.get("checked_at"), now) < hours * 3600:
+        return None
+    claim = settings.get(CLAIM) or {}
+    if claim.get("by") != instance_id and _age_s(claim.get("at"), now) < CLAIM_TTL_S:
+        return None                     # a peer is on it
+    db.setting_put(conn, CLAIM, {"by": instance_id,
+                                 "at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    conn.commit()
+    return save(conn, report(conn, store), by=f"background ({instance_id})")

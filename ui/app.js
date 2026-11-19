@@ -251,7 +251,7 @@ async function loadStats() {
       ["faces", s.faces], ["plates", s.plates],
       ["needs review", s.needs_review],
     ].map(([k, v]) => `<div>${k} <b>${v}</b></div>`).join("") +
-      storageCounter(s) + diskCounter(s);
+      storageCounter(s) + diskCounter(s) + orphanCounter(s);
   } catch (_) { /* header counters are cosmetic */ }
 }
 
@@ -294,6 +294,18 @@ function diskCounter(s) {
   return `<div class="disk${over ? " over" : near ? " near" : ""}" title="${esc(title)}">` +
     `disk <b>${d.used_pct}%</b>${guard} · ${gb(d.free_bytes)} GB free` +
     (over ? " · <b>REFUSING WORK</b>" : "") + `</div>`;
+}
+
+const hbytes = (b) => (b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(1) + " MB");
+
+// Bytes in the store that no record points at (from the last background or
+// manual check). Only shown when there is something to review.
+function orphanCounter(s) {
+  const o = s.orphans;
+  if (!o || !o.objects) return "";
+  return `<div class="disk near orphan-badge" title="checked ${esc(o.checked_at || "?")} · click to review">` +
+    `<a href="#settings" onclick="setTimeout(()=>$('s-orphans')?.scrollIntoView({behavior:'smooth'}),400)">` +
+    `orphaned <b>${o.objects} objects · ${hbytes(o.bytes)}</b> · review</a></div>`;
 }
 
 async function openDetail(sha, profile) {
@@ -1040,6 +1052,93 @@ async function loadDetectSettings() {
   }
 }
 
+/* Orphaned objects: bytes in the store that no record points at. The panel
+   opens on the cached report (no bucket listing); "check now" re-lists.
+   Deleting is per class and needs the operator to re-type the object count
+   shown -- the server refuses without confirm:true and never touches objects
+   younger than an hour (a write stores the object before its row). */
+const ORPHAN_HELP = {
+  image_deleted: "no image record at all (image deleted, or the database was reset)",
+  superseded: "image known, but no artifact for this profile any more (replaced/reprocessed)",
+  tombstoned: "artifact expired or evicted, but the object delete failed",
+  original_pruned: "a kept original whose record says pruned",
+  unparseable: "a key blurd never writes (left by something else: not deleted by default)",
+  probe: "a write-probe / housekeeping file",
+};
+async function loadOrphans(live = false) {
+  const el = $("s-orphans");
+  if (!el) return;
+  const g = hbytes;
+  el.innerHTML = `<h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+      color:var(--dim);margin:26px 0 8px">orphaned objects</h3><div class="notice">${live ? "listing the store…" : "loading…"}</div>`;
+  let r;
+  try {
+    r = await api("/storage/orphans" + (live ? "" : "?cached=1"));
+  } catch (err) { el.innerHTML += `<div class="notice">${esc(err.message)}</div>`; return; }
+  const head = `<h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
+      color:var(--dim);margin:26px 0 8px">orphaned objects</h3>`;
+  const btn = `<button class="ghost" id="o-check">check now</button>`;
+  if (!r) {
+    el.innerHTML = head + `<div class="notice">Not checked yet. The background check runs every
+      day (storage.orphan_check_hours); or ${btn}</div>`;
+    $("o-check").onclick = () => loadOrphans(true);
+    return;
+  }
+  const cls = Object.entries(r.classes || {});
+  const meta = `checked ${esc(r.checked_at || "?")} by ${esc(r.checked_by || "?")} · ` +
+    `${r.total.objects} objects / ${g(r.total.bytes)} in the store (${esc(r.backend)}), ` +
+    `${r.referenced.objects} referenced` +
+    (r.young && r.young.objects ? ` · ${r.young.objects} newer than ${Math.round(r.min_age_s / 60)} min ignored` : "") +
+    (r.scan_ms !== undefined ? ` · ${r.scan_ms} ms` : "");
+  const missing = r.missing_objects && r.missing_objects.count
+    ? `<div class="notice" style="color:var(--danger)">${r.missing_objects.count} record(s) point at a
+        missing object — not fixable by a prune; see the CLI <code>blurd storage orphans</code>.</div>` : "";
+  if (!cls.length) {
+    el.innerHTML = head + `<div class="notice">No orphans. ${meta} ${btn}</div>` + missing;
+    $("o-check").onclick = () => loadOrphans(true);
+    return;
+  }
+  const rows = cls.map(([c, v]) => {
+    const months = Object.entries(v.by_month || {}).map(([m, x]) => `${m}: ${x.objects}`).join(", ");
+    const samples = (v.sample || []).slice(0, 3).map((x) => esc(x.key)).join("<br>");
+    const def = !["unparseable", "probe"].includes(c);
+    return `<tr><td><label class="chk"><input type="checkbox" class="o-cls" value="${c}"
+        data-n="${v.objects}" data-b="${v.bytes}"${def ? " checked" : ""}> <b>${c}</b></label>
+        <br><small style="color:var(--dim)">${esc(ORPHAN_HELP[c] || "")}</small></td>
+      <td class="code">${v.objects}</td><td class="code">${g(v.bytes)}</td>
+      <td><small>${esc(months)}</small></td><td class="code"><small>${samples}</small></td></tr>`;
+  }).join("");
+  el.innerHTML = head + `<div class="notice">${meta} ${btn}</div>` + missing + `
+    <table><thead><tr><th>class</th><th>objects</th><th>size</th><th>written (month: count)</th><th>examples</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="mintbox"><button id="o-del" class="danger">Delete selected…</button><span id="o-msg"></span></div>`;
+  $("o-check").onclick = () => loadOrphans(true);
+  $("o-del").onclick = async () => {
+    const picked = [...document.querySelectorAll(".o-cls:checked")];
+    if (!picked.length) { $("o-msg").textContent = " select at least one class"; return; }
+    const n = picked.reduce((a, x) => a + +x.dataset.n, 0);
+    const b = picked.reduce((a, x) => a + +x.dataset.b, 0);
+    const classes = picked.map((x) => x.value);
+    const typed = prompt(
+      `Permanently delete ${n} objects (${g(b)}) of class ${classes.join(", ")} from the ${r.backend} store?\n\n` +
+      `No record points at them, so no image, code or link changes. This cannot be undone.\n` +
+      `The list is re-checked at delete time; objects younger than 1 hour are never deleted.\n\n` +
+      `Type ${n} to confirm:`);
+    if (typed === null) return;
+    if (typed.trim() !== String(n)) { $("o-msg").textContent = " count did not match — nothing deleted"; return; }
+    $("o-msg").textContent = " deleting…";
+    try {
+      const res = await api("/storage/orphans", { method: "POST",
+        body: JSON.stringify({ classes, confirm: true }) });
+      const d = res.deleted;
+      alert(`Deleted ${d.objects} objects (${g(d.bytes)}). ` +
+        `${d.skipped_young} too recent, ${d.errors} errors. Recorded in the audit log.`);
+      loadOrphans();
+      loadStats();
+    } catch (err) { $("o-msg").textContent = " " + err.message; }
+  };
+}
+
 /* Storage & defaults: instance-wide values kept in the shared database, so
    every replica applies them within seconds. Env-set paths render read-only.
    Scope limits (keys tab) remain the per-tenant floor on top of these. */
@@ -1073,7 +1172,8 @@ async function loadRuntimeSettings() {
               dk.max_pct ? ` · new work refused at ${dk.max_pct}%` : " · no disk guard"}` : "n/a"}</td></tr>
         <tr><td>real usage in the store <small style="color:var(--dim)">(lists the bucket / walks the disk)</small></td>
             <td class="code"><span id="r-scan-out">—</span> <button class="ghost" id="r-scan">scan</button></td></tr>
-      </tbody></table>`;
+      </tbody></table>
+      <div id="s-orphans"></div>`;
     el.innerHTML = usage + `
       <h3 style="font-size:11px;text-transform:uppercase;letter-spacing:1px;
                  color:var(--dim);margin:26px 0 8px">storage &amp; defaults</h3>
@@ -1105,6 +1205,7 @@ async function loadRuntimeSettings() {
         <button id="r-save">Save</button>
       </div>
       <div id="r-msg"></div>`;
+    loadOrphans();
     $("r-scan").onclick = async () => {
       $("r-scan-out").textContent = "scanning…";
       try {

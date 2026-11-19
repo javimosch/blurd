@@ -86,9 +86,25 @@ pass so the old copy remains a fallback. `--to local` reverses the whole thing.
 
 Writes go **object first, database row second**. An orphaned object is garbage a
 sweep can find; a row pointing at an object that was never written is a broken
-record with no way back. There is currently **no orphan sweep** — if a process
-dies between the two writes the object is simply never referenced. At 333 kB a
-time this is a housekeeping task, not an incident, but it is not yet automated.
+record with no way back. If a process dies between the two writes, or an image
+row goes away without its object (a database reset with the bucket kept), the
+object is simply never referenced again.
+
+**Orphan detection is automatic; deletion never is.** Every
+`storage.orphan_check_hours` (default 24, `0` = off,
+`BLURD_STORAGE_ORPHAN_CHECK_HOURS`, also editable in the dashboard) one replica
+lists the store, classifies every unreferenced object (`image_deleted`,
+`superseded`, `tombstoned`, `original_pruned`, `unparseable`, `probe`) and saves
+the report in the shared `settings` row `orphans_report`; a claim row stops N
+replicas listing the same bucket at once. Objects younger than an hour are
+reported as `young` and never as orphans (they may be a write in flight). The
+dashboard shows a header badge when the last report has orphans, and Settings →
+storage usage → *orphaned objects* lists each class with size, month and
+examples. Deleting is per class and needs the operator to re-type the object
+count; the server refuses `POST /ui-api/storage/orphans` without
+`"confirm": true`, re-classifies at delete time, audits
+`storage.orphans_delete`, and saves a fresh report. The CLI equivalent is
+`blurd storage orphans [--delete --class C]`.
 
 ## Measured cost
 

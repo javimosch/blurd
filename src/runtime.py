@@ -110,6 +110,7 @@ RUNTIME: Dict[str, Callable[[Any], Any]] = {
     "storage.evict": _choice("off", "oldest"),
     "storage.evict_high_pct": _int_range(10, 100),
     "storage.evict_low_pct": _int_range(5, 99),
+    "storage.orphan_check_hours": _int_range(0, 24 * 30),
 }
 
 

@@ -111,6 +111,10 @@ DEFAULTS = {
         "evict": "off",
         "evict_high_pct": 90,
         "evict_low_pct": 75,
+        # Background orphan check (read-only): every N hours one replica lists
+        # the store, classifies objects no row points at, and caches the report
+        # for the dashboard badge. Deletion always needs a human. 0 = off.
+        "orphan_check_hours": 24,
     },
     # Seconds to let in-flight jobs finish after SIGTERM. Should sit inside
     # the orchestrator's grace period (k8s terminationGracePeriodSeconds).
@@ -361,6 +365,7 @@ ENV_OVERRIDES = {
     "BLURD_STORAGE_EVICT": ("storage.evict", str),
     "BLURD_STORAGE_EVICT_HIGH_PCT": ("storage.evict_high_pct", int),
     "BLURD_STORAGE_EVICT_LOW_PCT": ("storage.evict_low_pct", int),
+    "BLURD_STORAGE_ORPHAN_CHECK_HOURS": ("storage.orphan_check_hours", int),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),

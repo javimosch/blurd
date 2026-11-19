@@ -840,17 +840,39 @@ class Handler(BaseHTTPRequestHandler):
             # GET = dry-run report. POST {"classes": [...], "min_age_s": N}
             # deletes; objects younger than min_age_s (>= 600) are never
             # touched, because a write stores the object before its row.
+            # GET ?cached=1 = the last saved report (no bucket listing; what the
+            # header badge and the panel open with). A live GET refreshes it.
+            # The POST needs "confirm": true -- the dashboard only sends it
+            # after a human re-typed the object count it was shown.
             from . import orphans as _orph
             if self.command == "POST":
                 body = self._json_body()
+                if body.get("confirm") is not True:
+                    raise ValidationError(
+                        'Deleting orphans needs "confirm": true; review the '
+                        "dry-run report (GET) first")
+                classes = body.get("classes") or []
+                bad = [c for c in classes if c not in _orph.CLASSES]
+                if not classes or bad:
+                    raise ValidationError("classes must name at least one orphan class",
+                                          {"got": bad or classes,
+                                           "known": list(_orph.CLASSES)})
                 min_age = max(int(body.get("min_age_s") or 3600), 600)
                 res = _orph.report(conn, self.server.blurd_store, min_age_s=min_age,
-                                   delete=True, classes=body.get("classes"))
+                                   delete=True, classes=classes)
                 db.audit(conn, "dashboard", "storage.orphans_delete", None,
-                         self.address_string(), res.get("deleted"))
+                         self.address_string(),
+                         {**(res.get("deleted") or {}), "classes": sorted(classes)})
                 conn.commit()
+                # The badge must reflect what is left, not what was there.
+                res["after"] = _orph.save(conn, _orph.report(
+                    conn, self.server.blurd_store))
+            elif self._one(q, "cached"):
+                res = _orph.latest(conn)
             else:
                 res = _orph.report(conn, self.server.blurd_store)
+                _orph.save(conn, res)
+                res["checked_by"] = "dashboard"
             return self._send(200, {"ok": True, "data": res})
         if sub.rstrip("/") == "/settings/runtime":
             if self.command == "POST":
@@ -864,7 +886,19 @@ class Handler(BaseHTTPRequestHandler):
         if sub.rstrip("/") == "/images":
             return self._send(200, {"ok": True, "data": client.list(**_filters(q))})
         if sub.rstrip("/") == "/stats":
-            return self._send(200, {"ok": True, "data": client.stats()})
+            st = client.stats()
+            from . import orphans as _orph
+            last = _orph.latest(conn)
+            if last:
+                # Dashboard only (/v1/stats does not carry it): the header badge.
+                # Probe files are housekeeping, not something to review.
+                cls = {c: v for c, v in (last.get("classes") or {}).items()
+                       if c != "probe"}
+                st["orphans"] = {
+                    "objects": sum(v["objects"] for v in cls.values()),
+                    "bytes": sum(v["bytes"] for v in cls.values()),
+                    "checked_at": last.get("checked_at")}
+            return self._send(200, {"ok": True, "data": st})
         if sub.rstrip("/") == "/facets":
             # The dashboard lists unscoped, so its chips list every tenant's
             # tags/metadata -- a scoped caller never reaches this endpoint.

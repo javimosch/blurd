@@ -448,6 +448,9 @@ def run(args, out: Out) -> int:
                 _db.audit(conn, "cli", "storage.orphans_delete", None, None,
                           res.get("deleted"))
                 conn.commit()
+                _orph.save(conn, _orph.report(conn, blobs), by="cli")
+            elif args.min_age == 3600:
+                _orph.save(conn, res, by="cli")     # refresh the dashboard badge
             gb = lambda b: f"{b / 1e9:.3f} GB"
             out.emit(res, human_lines=[
                 f"backend      {res['backend']}  ({'DRY RUN' if res['dry_run'] else 'DELETED'})",

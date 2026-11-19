@@ -1168,7 +1168,7 @@ def stats(conn, scope=None) -> Dict[str, Any]:
                     cached_for_seconds=round(STATS_TTL - (time.time() - hit[0]), 1))
     value = _stats_uncached(conn, scope)
     _STATS_CACHE[key] = (time.time(), value)
-    return value
+    return dict(value)        # a copy: callers add fields to it
 
 
 def _stats_uncached(conn, scope=None) -> Dict[str, Any]:

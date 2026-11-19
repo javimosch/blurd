@@ -55,6 +55,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Storage rotation (oldest-first eviction under the cap) | `src/rotation.py`, `spec/storage.md`, `tests/rotation_local.py` |
 | Per-scope ingest policies (max input size, forced optimize) | `src/policy.py`, `blurd scope-policy` |
 | Dashboard-editable instance defaults (shared DB, env locks) | `src/runtime.py` |
+| Orphaned objects: report, cached background check, confirmed delete | `src/orphans.py`, `spec/storage.md` |
 | Metadata dispatch (the facade, no queries) | `src/db.py` |
 | Metadata backends: SQL | `src/db_sql.py`, `src/dialect.py`, `spec/postgres.md` |
 | Metadata backends: documents | `src/db_mongo.py`, `spec/mongo.md` |
@@ -65,7 +66,7 @@ with an unhelpful ImportError. Use `./blurd`, or set `BLURD_PYTHON`.
 | Seam guard | `tests/seam_check.py` |
 | Throughput, capacity, scaling | `bench/throughput.py`, `spec/capacity.md` |
 | Listing performance, pagination | `db_sql.py` / `db_mongo.py` (`bulk_labels`, `query_artifacts`), `spec/scaling.md` |
-| Black-box conformance (196 checks) | `tests/conformance.py` |
+| Black-box conformance (214 checks) | `tests/conformance.py` |
 | Two backends must answer identically (77 checks) | `tests/backend_parity.py` |
 | Queue backpressure and the byte bound | `tests/queue_bytes.py` |
 | **How to deploy anything** (the operator hub) | `docs/deployment.md` |
@@ -321,3 +322,11 @@ never leaves that process.
     var that sets a path locks it in the UI. Add a dashboard setting by adding
     its path + validator to `runtime.RUNTIME` -- never infrastructure
     (backends, credentials, sizing).
+53. **Orphans are detected automatically, deleted only by a human.** The
+    background check (`storage.orphan_check_hours`) is read-only and caches its
+    report in the `settings` row `orphans_report`; the dashboard badge reads that
+    row, never the bucket. Deletion needs `"confirm": true` (the UI sends it only
+    after the operator re-types the count) and skips anything younger than an
+    hour, because rule 22 means a fresh object can legitimately have no row yet.
+    Do not wire deletion into the reaper: a database restored from an older
+    backup would make every newer object look orphaned.

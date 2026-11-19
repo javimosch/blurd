@@ -102,6 +102,7 @@ class JobQueue:
                 self.prune_expired()
                 self.prune_originals()
                 self.rotate()
+                self.check_orphans()
                 self.prune_audit()
                 cb = getattr(self, "on_sweep", None)
                 if cb:
@@ -160,6 +161,14 @@ class JobQueue:
         oldest-first down to the low mark. No-op when rotation is off."""
         conn = db.connect(self.cfg.db_file)
         return rotation.sweep(self.cfg, conn, store.build(self.cfg))
+
+    def check_orphans(self):
+        """Refresh the cached orphan report when due (read-only; deleting
+        orphans always needs a human in the dashboard or the CLI)."""
+        from . import orphans
+        conn = db.connect(self.cfg.db_file)
+        return orphans.check_due(self.cfg, conn, store.build(self.cfg),
+                                 self.instance_id)
 
     def prune_originals(self) -> int:
         """Delete retained source images past their deadline. Unlike the

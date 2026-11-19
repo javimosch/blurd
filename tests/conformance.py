@@ -477,8 +477,29 @@ def main():
         orp = json.loads(b or b"{}").get("data") or {}
         check("the orphan report is a dry run and accounts for every object",
               s == 200 and orp.get("dry_run") is True
-              and orp["total"]["objects"] == orp["referenced"]["objects"] + orp["orphans"]["objects"],
-              f"got {s}/{ {k: orp.get(k) for k in ('dry_run', 'total', 'orphans')} }")
+              and orp["total"]["objects"] == orp["referenced"]["objects"]
+              + orp["orphans"]["objects"] + orp.get("young", {}).get("objects", 0),
+              f"got {s}/{ {k: orp.get(k) for k in ('dry_run', 'total', 'orphans', 'young')} }")
+        s, b, _ = http_raw(f"{a.url}/ui-api/storage/orphans?cached=1",
+                           headers={"Authorization": basic})
+        cached = json.loads(b or b"{}").get("data") or {}
+        check("a live orphan check is saved and served cached (no bucket listing)",
+              s == 200 and cached.get("checked_at") == orp.get("checked_at")
+              and cached.get("total") == orp.get("total"), f"got {s}/{sorted(cached)}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/storage/orphans", method="POST",
+                           headers=authed, body=b'{"classes":["image_deleted"]}')
+        check("deleting orphans without confirm:true is refused",
+              s == 422 and b"validation_error" in b, f"got {s} {b[:100]}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/storage/orphans", method="POST",
+                           headers=authed, body=b'{"classes":["nope"],"confirm":true}')
+        check("deleting an unknown orphan class is refused", s == 422, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/stats", headers={"Authorization": basic})
+        st_o = (json.loads(b or b"{}").get("data") or {}).get("orphans") or {}
+        check("dashboard stats carry the orphan summary for the header badge",
+              s == 200 and "objects" in st_o and "checked_at" in st_o, f"got {s}/{st_o}")
+        s, b, _ = http(f"{a.url}/v1/stats", key=a.api_key)
+        check("/v1/stats does not expose the orphan summary",
+              "orphans" not in (json.loads(b or b"{}").get("data") or {}), "present")
 
         s, b, _ = http_raw(f"{a.url}/ui-api/audit", headers={"Authorization": basic})
         check("audit trail is readable from the dashboard", s == 200, f"got {s}")
