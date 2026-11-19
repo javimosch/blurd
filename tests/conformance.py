@@ -98,6 +98,7 @@ def main():
     ap.add_argument("--bin", default="./blurd")
     ap.add_argument("--url", default="http://127.0.0.1:8770")
     ap.add_argument("--api-key", required=True)
+    ap.add_argument("--spec", help="path to openapi.yaml (default: ../spec next to this file)")
     ap.add_argument("--image", required=True)
     ap.add_argument("--dashboard-user", default="admin")
     ap.add_argument("--dashboard-password",
@@ -257,6 +258,47 @@ def main():
           any(i["source_sha"] == sha for i in listing.get("items", [])))
     s, _, _ = http(f"{a.url}/v1/images?tag=no-such-tag-xyz", key=a.api_key)
     check("unknown tag filter still 200s", s == 200)
+
+    print("\n-- the spec documents what the API returns")
+    # Rule 5 makes spec/openapi.yaml the contract the ports implement, so a
+    # field the server returns but the spec does not list is a silent fork.
+    # Only checked when the spec is reachable next to this file (a port's
+    # repository may keep it elsewhere: pass --spec).
+    spec = None
+    try:
+        import yaml
+        spec_path = a.spec or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "..", "spec", "openapi.yaml")
+        spec = yaml.safe_load(open(spec_path))
+    except Exception as e:
+        print(f"  skip  spec not loadable ({e})")
+    if spec:
+        art = spec["components"]["schemas"]["Artifact"]["properties"]
+        s, b, _ = http(f"{a.url}/v1/images/{sha}", key=a.api_key)
+        rec = json.loads(b).get("data", {})
+        extra = sorted(set(rec) - set(art))
+        check("every field of the image record is in the Artifact schema", not extra,
+              f"undocumented: {extra}")
+        for part in ("blob", "image", "stats"):
+            got = set((rec.get(part) or {}))
+            known = set(art[part].get("properties", {}))
+            extra = sorted(got - known)
+            check(f"every field of record.{part} is in the spec", not extra,
+                  f"undocumented: {extra}")
+        known = set(art["stats"]["properties"]["output"]["properties"])
+        extra = sorted(set((rec.get("stats") or {}).get("output") or {}) - known)
+        check("every field of record.stats.output is in the spec", not extra,
+              f"undocumented: {extra}")
+        job_spec = spec["components"]["schemas"]["Job"]["properties"]
+        extra = sorted(set(done) - set(job_spec))
+        check("every field of a job is in the Job schema", not extra,
+              f"undocumented: {extra}")
+        s, b, _ = http(f"{a.url}/v1/stats", key=a.api_key)
+        st = json.loads(b).get("data", {})
+        desc = spec["paths"]["/v1/stats"]["get"]["responses"]["200"]["description"]
+        extra = sorted(k for k in st if k not in desc)
+        check("every /v1/stats field is named in the spec", not extra,
+              f"undocumented: {extra}")
 
     print("\n-- ttl: blobs expire, rows survive")
     # Unique per run: a stale binding from an earlier run would resolve the

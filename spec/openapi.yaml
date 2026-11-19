@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: blurd
-  version: "0.12.0"
+  version: "0.23.4"
   description: >
     Machine-to-machine image redaction. Submit an image by URL or as raw bytes;
     blurd detects faces and licence plates, redacts them, stores only the
@@ -60,6 +60,7 @@ components:
         source_sha: { type: string, nullable: true, description: "known only once processed" }
         profile_hash: { type: string }
         source_kind: { type: string, enum: [url, stream, code-hit] }
+        source_ref: { type: string, nullable: true, description: "the submitted URL for url jobs; null for uploads" }
         cached: { type: boolean, description: "true when nothing was reprocessed" }
         attempts: { type: integer }
         created_at: { type: string }
@@ -108,6 +109,8 @@ components:
             sha256: { type: string }
             bytes: { type: integer }
             mime: { type: string }
+            key: { type: string, description: "object key in the blob store (relative path); empty once the bytes were pruned (TTL or eviction)" }
+            location: { type: string, description: "where the bytes live: a local path, or s3://bucket/prefix/key" }
         image:
           type: object
           properties:
@@ -145,7 +148,32 @@ components:
             detections: { type: object }
             models: { type: object }
             redact: { type: string }
+            source:
+              type: object
+              description: "the source as received (its bytes are never stored)"
+              properties:
+                bytes: { type: integer }
+                width: { type: integer }
+                height: { type: integer }
+                mime: { type: string }
+                kind: { type: string, enum: [url, file, stream] }
+            output:
+              type: object
+              description: "what was stored (absent on artifacts made before 0.23)"
+              properties:
+                bytes: { type: integer }
+                optimized: { type: boolean, description: "true when output.optimize resized/recompressed the source" }
+                width: { type: integer }
+                height: { type: integer }
         created_at: { type: string }
+        expires_at:
+          type: string
+          nullable: true
+          description: "when the redacted bytes are (or were) pruned: the profile's storage.ttl counted from processing, or the moment rotation evicted them; null = kept until deleted or evicted"
+        evicted_at:
+          type: string
+          nullable: true
+          description: "set when storage rotation (storage.evict=oldest) deleted the bytes to stay under the cap; reads then answer 410 with details.reason=evicted. The record, codes and detections stay."
         errors: { type: array, items: { type: string } }
         warnings: { type: array, items: { type: string } }
 paths:
@@ -218,7 +246,7 @@ paths:
             JSON profile overrides, deep-merged into the defaults. A profile is
             the processing configuration — detect.{face,plate}.{model,min_score},
             detect.max_side, redact.{mode,modes,strength,expand,shape},
-            output.{format,quality,max_side}, storage.ttl. redact.mode is one of
+            output.{format,quality,max_side,optimize}, storage.ttl. redact.mode is one of
             pixelate|blur|solid; redact.modes is an optional per-class override
             {"face":m,"plate":m} taking precedence over mode for that class.
             Every mode the profile uses must be in the instance's
@@ -229,7 +257,19 @@ paths:
             prunes the blob after the deadline: reads answer 410
             resource_expired while the record, detections and labels survive;
             a resubmit regenerates the bytes. Example for a 24h blob:
-            {"storage":{"ttl":86400}}
+            {"storage":{"ttl":86400}}.
+            output.optimize {above_bytes, max_side (256–16384, default 2560),
+            quality (30–95, default 82)}: a source larger than above_bytes is
+            downscaled to max_side and re-encoded at that quality before
+            redaction; output is JPEG either way. Example:
+            {"output":{"optimize":{"above_bytes":1500000}}}.
+            SCOPE LIMITS: the operator may attach limits to a key's scope
+            (max_input_bytes, optimize, ttl, max_keep_original). They are a
+            floor, not a default: per field the strictest of request,
+            instance default and scope limit applies, so a request can tighten
+            (a lower above_bytes, a shorter ttl) but never loosen them, and the
+            effective values are what profile_hash covers. keep_original is
+            capped at max_keep_original.
         - { in: query, name: force, schema: { type: string }, description: "1 to bypass the cache" }
       requestBody:
         content:
@@ -251,7 +291,9 @@ paths:
         "202": { description: "Job accepted; Location header points at /v1/jobs/<id>", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
         "200": { description: "Job already settled (cache hit, or ?wait covered it)", content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
         "401": { description: "Missing or invalid API key", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-        "422": { description: "Validation failed (bad image, non-public URL, too large)" }
+        "422": { description: "validation_error: bad image, non-public URL, too large, a disallowed redact mode, or an image above this key's scope max_input_bytes (the message names the limit; details carry bytes, max_input_bytes, tenant)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "503": { description: "overloaded (code 108): the queue's byte budget is full, or the instance is draining; honour retry_after and retry (never 502)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "507": { description: "storage_full: the storage cap (storage.max_bytes) or the disk guard refuses new work. With rotation on (storage.evict=oldest) the cap evicts the oldest images instead, so 507 then means the disk guard or a bucket that is full even after eviction", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     get:
       summary: List stored artifacts
       parameters:
@@ -283,7 +325,7 @@ paths:
         - { in: path, name: sha, required: true, schema: { type: string } }
         - { in: query, name: profile, schema: { type: string } }
       responses:
-        "200": { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
+        "200": { description: "ok. Several artifacts may exist for one sha (one per profile); without ?profile the newest LIVE one is returned (an expired or evicted variant never shadows a live one), the same one /v1/blobs/{sha} serves", content: { application/json: { schema: { $ref: '#/components/schemas/Artifact' } } } }
         "404": { description: not found }
     delete:
       summary: Delete an image, its artifacts and its blobs
@@ -499,15 +541,15 @@ paths:
         "401": { description: "dashboard auth required" }
     post:
       security: []
-      summary: Mint an API key (optionally scoped) — opt-in, gated by a second secret
+      summary: Mint an API key (optionally scoped)
       description: >
-        Requires dashboard auth, the CSRF token, `dashboard_allow_key_creation`,
-        and the X-Blurd-Admin-Secret header. Disabled by default: a minted key
-        outlives the dashboard password, so this would otherwise make one shared
-        human credential the root of trust for machine access.
+        Requires dashboard auth and the CSRF token. On by default since 0.23;
+        BLURD_DASHBOARD_ALLOW_KEY_CREATION=false turns it off (409). When
+        BLURD_DASHBOARD_KEY_SECRET is set, every mint also needs it as
+        X-Blurd-Admin-Secret: a minted key outlives the dashboard password.
       parameters:
         - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
-        - { in: header, name: X-Blurd-Admin-Secret, required: true, schema: { type: string } }
+        - { in: header, name: X-Blurd-Admin-Secret, required: false, schema: { type: string }, description: "only when a key secret is configured" }
       requestBody:
         content:
           application/json:
@@ -529,14 +571,152 @@ paths:
   /ui-api/keys/{key_id}:
     delete:
       security: []
-      summary: Revoke a key — always available, effective immediately
+      summary: Revoke a key (always available, immediate); with ?purge=1 remove a revoked one
+      description: >
+        Without purge: revoke. With purge=1: delete the row of an
+        already-revoked key for good (audited); an active key is never
+        removed, only revoked first (409).
+      parameters:
+        - { in: path, name: key_id, required: true, schema: { type: string } }
+        - { in: query, name: purge, schema: { type: string }, description: "1 = remove a revoked key from the list" }
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "revoked, or removed" }
+        "401": { description: "missing CSRF token" }
+        "404": { description: "no such key, or already revoked" }
+        "409": { description: "purge of a key that is still active" }
+    patch:
+      security: []
+      summary: Rename a key (label only; secret and scope unchanged)
       parameters:
         - { in: path, name: key_id, required: true, schema: { type: string } }
         - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [name], properties: { name: { type: string } } }
       responses:
-        "200": { description: revoked }
-        "401": { description: "missing CSRF token" }
-        "404": { description: "no such key, or already revoked" }
+        "200": { description: "the key's listing row" }
+        "404": { description: "no such key" }
+  /ui-api/scope-policies:
+    get:
+      security: []
+      summary: Scope limits, one row per scope (tenant) with its active keys
+      responses: { "200": { description: "scopes[]: {tenant, description, keys[], policy}; tenant is global for unrestricted keys" } }
+  /ui-api/scope-policies/{tenant}:
+    put:
+      security: []
+      summary: Set a scope's limits (replaces them; all replicas within seconds)
+      description: >
+        Limits are a floor every request with a key of this scope must respect;
+        see the profile parameter of POST /v1/images. Stored in the shared
+        database, audited.
+      parameters:
+        - { in: path, name: tenant, required: true, schema: { type: string }, description: "global, or t_<16 hex> from the listing" }
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_input_bytes: { type: integer, description: "1024..2^31; larger sources are refused with 422" }
+                optimize: { type: object, description: "{above_bytes, max_side, quality}: forced optimization floor" }
+                ttl: { type: integer, description: "seconds (60..2592000): default retention, a request can only shorten it" }
+                max_keep_original: { type: integer, description: "seconds (60..2592000): ceiling for keep_original" }
+                label: { type: string }
+      responses:
+        "200": { description: "the stored policy" }
+        "422": { description: "unknown key or out-of-range value" }
+    delete:
+      security: []
+      summary: Remove a scope's limits
+      parameters:
+        - { in: path, name: tenant, required: true, schema: { type: string } }
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      responses: { "200": { description: removed } }
+  /ui-api/settings/runtime:
+    get:
+      security: []
+      summary: Instance defaults the dashboard may change, with their source
+      description: >
+        settings: {dotted.path: {value, default, source: env|dashboard|default/file}},
+        locked[] (paths an env var sets: read-only here), ttl_seconds (how
+        long a replica may serve a stale value). Layering:
+        defaults < config.json < these (shared database) < env.
+      responses: { "200": { description: "settings, locked, ttl_seconds" } }
+    post:
+      security: []
+      summary: Change instance defaults (only the paths sent; null = back to default)
+      description: >
+        Paths: profile.redact.mode, profile.redact.modes, allowed_redact_modes,
+        profile.detect.{face,plate}.min_score, profile.detect.plate.min_aspect,
+        profile.detect.plate.max_area, profile.output.optimize,
+        profile.output.quality, profile.storage.ttl, fetch.max_bytes,
+        storage.max_bytes, storage.evict (off|oldest), storage.evict_high_pct,
+        storage.evict_low_pct, storage.orphan_check_hours. Validated per path;
+        an env-locked path is refused. Audited; every replica applies it within
+        ttl_seconds.
+      parameters:
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true, example: { "storage.max_bytes": 1000000000, "storage.evict": "oldest" } }
+      responses:
+        "200": { description: "the new state, same shape as GET" }
+        "422": { description: "unknown path, invalid value, env-locked path, or evict_low_pct >= evict_high_pct" }
+  /ui-api/storage/scan:
+    get:
+      security: []
+      summary: Real store usage next to blurd's accounting
+      description: >
+        Lists the bucket (S3 ListObjectsV2) or walks the blob directory. On
+        demand only: O(objects / 1000) requests.
+      responses: { "200": { description: "backend, store_objects, store_bytes, accounted_bytes, drift_bytes, scan_ms" } }
+  /ui-api/storage/orphans:
+    get:
+      security: []
+      summary: Orphaned objects report (dry run)
+      description: >
+        Objects in the store that no record points at, by class:
+        image_deleted, superseded, tombstoned, original_pruned, unparseable,
+        probe. Objects younger than min_age_s (3600) count as `young`, never as
+        orphans (a write stores the object before its row). A live call lists
+        the store and saves the report; ?cached=1 returns the last saved one
+        (also refreshed by the background check every
+        storage.orphan_check_hours) without listing.
+      parameters:
+        - { in: query, name: cached, schema: { type: string }, description: "1 = last saved report, no listing (null when never checked)" }
+      responses: { "200": { description: "backend, dry_run, min_age_s, total, referenced, orphans, young, missing_objects {count, sample}, classes {class: {objects, bytes, sample[], by_month}}, accounted_bytes, checked_at, checked_by, scan_ms" } }
+    post:
+      security: []
+      summary: Delete orphans of the given classes (human-confirmed)
+      description: >
+        Re-classifies at delete time and removes only orphans of the listed
+        classes older than min_age_s. Never automatic. Audited as
+        storage.orphans_delete; a fresh report is saved afterwards and
+        returned as `after`.
+      parameters:
+        - { in: header, name: X-Blurd-CSRF, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [classes, confirm]
+              properties:
+                classes: { type: array, items: { type: string, enum: [image_deleted, superseded, tombstoned, original_pruned, unparseable, probe] } }
+                confirm: { type: boolean, description: "must be true" }
+                min_age_s: { type: integer, default: 3600, minimum: 600 }
+      responses:
+        "200": { description: "the report plus deleted {objects, bytes, skipped_young, errors}, delete_classes, after" }
+        "422": { description: "confirm is not true, or no/unknown classes" }
+  /openapi.yaml:
+    get:
+      security: []
+      summary: This document (dashboard auth), for download or code generation
+      responses: { "200": { description: "application/yaml" } }
   /ui-api/audit:
     get:
       security: []
@@ -546,4 +726,4 @@ paths:
   /v1/stats:
     get:
       summary: Aggregate counters
-      responses: { "200": { description: "images, artifacts, detections, faces, plates, needs_review, bytes_stored, bytes_live, storage_max_bytes, storage_used_bytes (redacted + retained originals), storage_rotation {enabled, high_bytes, low_bytes}, disk {path,total_bytes,used_bytes,free_bytes,used_pct,max_pct} (operator key only), tags[]" } }
+      responses: { "200": { description: "scope (unrestricted, or the key's scope), images, artifacts, detections, faces, plates, codes, needs_review, jobs {status: count}, queue {queued, running, done, failed, in_queue, workers, queue_max, queued_bytes, queue_max_bytes}, profile_hash (the instance default profile), home (operator key only), cached_for_seconds (counters are memoised ~3 s), bytes_stored, bytes_live, storage_max_bytes, storage_used_bytes (redacted + retained originals), storage_rotation {enabled, high_bytes, low_bytes}, disk {path,total_bytes,used_bytes,free_bytes,used_pct,max_pct} (operator key only), tags[]" } }

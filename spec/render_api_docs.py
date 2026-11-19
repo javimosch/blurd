@@ -99,7 +99,13 @@ GROUPS = {
     },
     "dashboard — session-authed, not for integrations": {
         "/ui-api/keys": ["get", "post"],
-        "/ui-api/keys/{key_id}": ["delete"],
+        "/ui-api/keys/{key_id}": ["delete", "patch"],
+        "/ui-api/scope-policies": ["get"],
+        "/ui-api/scope-policies/{tenant}": ["put", "delete"],
+        "/ui-api/settings/runtime": ["get", "post"],
+        "/ui-api/storage/scan": ["get"],
+        "/ui-api/storage/orphans": ["get", "post"],
+        "/openapi.yaml": ["get"],
         "/ui-api/audit": ["get"],
     },
 }
@@ -191,7 +197,7 @@ def render():
     endpoints = []
     for path, ops in spec.get("paths", {}).items():
         for method, op in ops.items():
-            if method not in ("get", "post", "put", "delete"):
+            if method not in ("get", "post", "put", "patch", "delete"):
                 continue
             endpoints.append({
                 "path": path, "method": method.upper(),
