@@ -406,7 +406,7 @@ def _live_first(sql: str, args: list):
     variant is expired the newest still resolves, preserving the 410
     `resource_expired` contract instead of collapsing into a 404."""
     return (sql + " ORDER BY (a.expires_at IS NULL OR a.expires_at > ?) DESC,"
-                  " a.created_at DESC LIMIT 1", args + [now()])
+                  " a.created_at DESC, a.id DESC LIMIT 1", args + [now()])
 
 
 def thumb_for(conn, sha: str, profile: str = None):
@@ -696,9 +696,12 @@ def find_artifact_by_id(conn, artifact_id: int):
 
 
 def find_artifact_by_sha_prefix(conn, sha: str):
-    return conn.execute(
-        """SELECT * FROM artifacts WHERE source_sha LIKE ?
-           ORDER BY created_at DESC LIMIT 1""", (sha + "%",)).fetchone()
+    """Same resolution as blob_ref/thumb_for/artifact_for_sha (live-first,
+    id tiebreak), so the record, the bytes and a manual-region edit of one
+    sha always name the same artifact."""
+    sql, args = _live_first("SELECT a.* FROM artifacts a WHERE a.source_sha LIKE ?",
+                            [sha + "%"])
+    return conn.execute(sql, args).fetchone()
 
 
 def delete_artifact(conn, artifact_id: int) -> None:

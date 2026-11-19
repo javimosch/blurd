@@ -427,9 +427,9 @@ def find_artifact_by_id(conn, artifact_id: int):
 
 
 def find_artifact_by_sha_prefix(conn, sha: str):
-    doc = conn.db["artifacts"].find_one(
-        {"source_sha": {"$regex": "^" + _escape(sha)}}, _NO_HEAVY,
-        sort=[("created_at", -1)])
+    doc = _live_first(conn.db["artifacts"].find(
+        {"source_sha": {"$regex": "^" + _escape(sha)}}, _NO_HEAVY
+    ).sort([("created_at", -1), ("_id", -1)]).limit(8))
     return _row(doc, "id")
 
 
@@ -553,7 +553,9 @@ def _live_first(cursor):
     """Newest live artifact wins; expired variants rank last so a dead TTL'd
     variant cannot shadow a live one for the same source. When every variant
     is expired the newest still resolves, preserving 410 resource_expired.
-    Callers must have ordered the cursor by created_at DESC already."""
+    Callers must have ordered the cursor by created_at DESC, _id DESC (the
+    timestamps are second-precision, so same-second variants need the id
+    tiebreak or two reads of one sha can resolve to different artifacts)."""
     docs = list(cursor)
     if not docs:
         return None
@@ -571,7 +573,7 @@ def thumb_for(conn, sha: str, profile: str = None):
         q["profile_hash"] = profile
     art = _live_first(conn.db["artifacts"].find(
         q, {"blob_sha": 1, "source_sha": 1, "expires_at": 1, "evicted_at": 1}
-        ).sort("created_at", -1).limit(8))
+        ).sort([("created_at", -1), ("_id", -1)]).limit(8))
     if not art:
         return None
     t = conn.db["thumbs"].find_one({"_id": art["_id"]})
@@ -587,7 +589,7 @@ def blob_ref(conn, sha: str, profile: str = None):
         q["profile_hash"] = profile
     doc = _live_first(conn.db["artifacts"].find(
         q, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-            "expires_at": 1, "evicted_at": 1}).sort("created_at", -1).limit(8))
+            "expires_at": 1, "evicted_at": 1}).sort([("created_at", -1), ("_id", -1)]).limit(8))
     return _row(doc, "id")
 
 
@@ -597,7 +599,7 @@ def artifact_for_sha(conn, sha: str, profile: str = None):
     q: Dict[str, Any] = {"source_sha": sha}
     if profile:
         q["profile_hash"] = profile
-    doc = _live_first(conn.db["artifacts"].find(q).sort("created_at", -1).limit(8))
+    doc = _live_first(conn.db["artifacts"].find(q).sort([("created_at", -1), ("_id", -1)]).limit(8))
     return _row(doc, "id")
 
 
@@ -639,7 +641,7 @@ def blob_ref_by_code(conn, code: str, profile: str = None, tenant: str = None,
             aq["profile_hash"] = {"$in": bound}
     art = _live_first(conn.db["artifacts"].find(
         aq, {"blob_path": 1, "blob_sha": 1, "mime": 1, "source_sha": 1,
-             "expires_at": 1, "evicted_at": 1}).sort("created_at", -1).limit(8))
+             "expires_at": 1, "evicted_at": 1}).sort([("created_at", -1), ("_id", -1)]).limit(8))
     if not art:
         return None
     out = _row(art)
