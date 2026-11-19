@@ -54,6 +54,11 @@ services:
       # "oldest" here evicts the oldest blobs past the high mark of the cap
       # instead of answering 507, and locks the field in the dashboard.
       BLURD_STORAGE_EVICT: ${BLURD_STORAGE_EVICT:-}
+      # Coolify's Traefik (coolify-proxy) on this app's network, so requests via
+      # the domains are logged and limited by the real caller. Never the Docker
+      # gateway (.1): that is the published port, and trusting it would let any
+      # direct caller choose its address. Re-check after a proxy recreate.
+      BLURD_TRUSTED_PROXIES: ${BLURD_TRUSTED_PROXIES:-}
       # Opt-in original retention (spec/originals.md). Empty = not pinned, so
       # the dashboard settings tab controls it; any value set here locks it.
       BLURD_ORIGINALS_ENABLED: ${BLURD_ORIGINALS_ENABLED:-}
