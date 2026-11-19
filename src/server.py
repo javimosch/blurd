@@ -645,6 +645,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/ui-api/"):
             return self._ui_api(path)
 
+        if path.rstrip("/") == "/openapi.yaml":
+            # The contract the API tab renders, as a download for integrators
+            # and code generators (the file is shipped in the image).
+            spec = UI_DIR.parent / "spec" / "openapi.yaml"
+            return self._send(200, spec.read_bytes(), "application/yaml; charset=utf-8",
+                              {"Content-Disposition": 'inline; filename="blurd-openapi.yaml"'})
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         target = (UI_DIR / rel).resolve()
         if not str(target).startswith(str(UI_DIR.resolve())) or not target.is_file():

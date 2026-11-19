@@ -503,6 +503,9 @@ def main():
 
         s, b, _ = http_raw(f"{a.url}/ui-api/audit", headers={"Authorization": basic})
         check("audit trail is readable from the dashboard", s == 200, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/openapi.yaml", headers={"Authorization": basic})
+        check("the dashboard serves the OpenAPI spec for download",
+              s == 200 and b.lstrip().startswith(b"openapi:"), f"got {s} {b[:40]}")
 
         s, _, _ = http_raw(f"{a.url}/v1/stats",
                            headers={"Authorization": basic})

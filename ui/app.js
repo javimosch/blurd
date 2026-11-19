@@ -1367,7 +1367,9 @@ async function loadApiDocs() {
                    "operator — instance management",
                    "dashboard — session-authed, not for integrations"];
     el.innerHTML = `<div class="notice">
-        <b>Machine API reference</b> — generated from <code>spec/openapi.yaml</code>,
+        <b>Machine API reference</b> — generated from <code>spec/openapi.yaml</code>
+        (<a href="/openapi.yaml" download="blurd-openapi.yaml">download</a> ·
+        <a href="/openapi.yaml" target="_blank" rel="noopener">view</a>),
         the same file the Go/machin ports implement. Every call is JSON in,
         JSON out; errors share one typed vocabulary with the CLI. All
         <code>/v1</code> calls need <code>Authorization: Bearer &lt;key&gt;</code>
