@@ -24,6 +24,7 @@ from . import (__version__, auth, db, jobs as jobs_mod, originals, pipeline,
 from .client import LocalClient
 from .config import (Config, DEFAULT_PROFILE, OPTIMIZE_DEFAULTS,
                      OPTIMIZE_LIMITS, REDACT_MODES)
+from . import clientip
 from .errors import (AuthFailed, BlurdError, Conflict, Expired, Internal,
                      NotFound, RateLimited, ValidationError)
 
@@ -56,7 +57,7 @@ FEEDBACK_MAX_PER_MIN = 30
 # Per-IP fixed-window limits. /pub is unauthenticated so it gets the tight
 # bucket; everything else already demands a credential, so the bound is only
 # a floor against a misbehaving or compromised caller.
-RATE_PUBLIC_PER_MIN = 60
+RATE_PUBLIC_PER_MIN = 60      # defaults; the live values are cfg rate.*
 RATE_API_PER_MIN = 300
 
 
@@ -78,6 +79,10 @@ class _RateLimiter:
         self._blocked = {}     # (cls, ip, window) -> [count, path]
 
     def hit(self, cls: str, ip: str, path: str, limit: int) -> bool:
+        """`ip` is the bucket: a client address, or "key:<id>" for an
+        authenticated caller. limit <= 0 means this class is unlimited."""
+        if limit <= 0:
+            return True
         w = int(time.time() // self.WINDOW)
         with self._lock:
             k = (cls, ip, w)
@@ -183,19 +188,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._daemon_health()
             if path.rstrip("/") == "/_shutdown" and method == "POST":
                 return self._daemon_shutdown()
-            # Per-IP buckets. The daemon endpoints above are exempt: an
-            # orchestrator probing health must not be able to lock itself out.
+            # The daemon endpoints above are exempt: an orchestrator probing
+            # health must not be able to lock itself out. /v1 is limited
+            # inside _api, per API key once the key is known (see _limit).
             public = path.startswith("/pub/")
-            limit = RATE_PUBLIC_PER_MIN if public else RATE_API_PER_MIN
-            if not self.server.blurd_rate.hit(
-                    "public" if public else "api",
-                    self.client_address[0], path, limit):
-                raise RateLimited(
-                    f"Rate limit exceeded ({limit}/min for "
-                    f"{'public' if public else 'authenticated'} endpoints)",
-                    {"limit_per_min": limit,
-                     "class": "public" if public else "api"},
-                    retry_after=_RateLimiter.WINDOW)
+            if public:
+                self._limit("public", self.address_string(), path)
+            elif not path.startswith("/v1/"):
+                # its own bucket: keyless /v1 traffic from the same address
+                # (e.g. someone guessing keys) must not lock the operator out
+                self._limit("dashboard", self.address_string(), path)
             if public:
                 return self._pub(method, path)
             # Plugin routes get first pick of the non-/v1 space (e.g. /pro/...).
@@ -216,6 +218,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:                      # never leak a traceback
             self.server.blurd_log(f"unhandled: {exc!r}")
             self._error(Internal("Unhandled server error", {"repr": repr(exc)[:200]}))
+
+    def address_string(self):
+        """The client, not the proxy in front of it (see src/clientip.py).
+        Used by the rate limiter, the audit trail and the access log; the
+        loopback-only /_shutdown check keeps reading the TCP peer."""
+        ip = getattr(self, "_blurd_client_ip", None)
+        if ip is None:
+            ip = clientip.resolve(self.client_address[0],
+                                  self.headers.get("X-Forwarded-For") if self.headers else None,
+                                  str(self.server.blurd_cfg.get("trusted_proxies") or ""))
+            self._blurd_client_ip = ip
+        return ip
+
+    def _limit(self, cls: str, bucket: str, path: str):
+        cfg = self.server.blurd_cfg
+        limit = int(cfg.get("rate.public_per_min" if cls == "public"
+                            else "rate.api_per_min",
+                            RATE_PUBLIC_PER_MIN if cls == "public" else RATE_API_PER_MIN))
+        if not self.server.blurd_rate.hit(cls, bucket, path, limit):
+            per = ("API key" if bucket.startswith("key:") else "client address")
+            raise RateLimited(
+                f"Rate limit exceeded ({limit}/min per {per} for "
+                f"{'public' if cls == 'public' else 'authenticated'} endpoints)",
+                {"limit_per_min": limit, "class": cls,
+                 "per": "api_key" if bucket.startswith("key:") else "ip",
+                 "scope": "per instance (each replica counts separately)"},
+                retry_after=_RateLimiter.WINDOW)
 
     # -- daemon lifecycle (cli-daemon-spec) -----------------------------------
     def _daemon_health(self):
@@ -250,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, {"ok": False, "error": {
                 "code": 87, "type": "too_large",
                 "message": f"Feedback body exceeds {FEEDBACK_MAX_BYTES} bytes"}})
-        ip = self.client_address[0]
+        ip = self.address_string()
         hits = srv.blurd_feedback_hits.setdefault(ip, [])
         now_ = time.time()
         hits[:] = [t for t in hits if now_ - t < 60]
@@ -298,6 +327,7 @@ class Handler(BaseHTTPRequestHandler):
         conn = db.connect(srv.blurd_cfg.db_file)
 
         if path.rstrip("/") == "/v1/health":
+            self._limit("api", self.address_string(), path)
             srv_ = self.server
             draining = srv_.blurd_queue.draining
             return self._send(503 if draining else 200, {
@@ -310,6 +340,7 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         if path.rstrip("/") == "/v1/feedback":
+            self._limit("api", self.address_string(), path)
             if method == "POST":
                 return self._feedback_submit(conn)
             if method == "GET":
@@ -318,6 +349,7 @@ class Handler(BaseHTTPRequestHandler):
         q = self._query()
         m_orig = re.match(r"^/v1/originals/(?P<sha>[0-9a-f]{64})$", path)
         if m_orig and method == "GET" and self._one(q, "sig") is not None:
+            self._limit("api", self.address_string(), path)
             # A signed URL is a capability minted for a caller that already
             # passed the scope check, so it stands in for the key.
             if not originals.verify(conn, m_orig.group("sha"),
@@ -326,8 +358,16 @@ class Handler(BaseHTTPRequestHandler):
                                  {"hint": "fetch the image record again for a fresh url"})
             return self._serve_original(client, m_orig.group("sha"), None)
 
-        # Everything else is machine-to-machine and needs a key.
-        principal = auth.require_api_key(conn, self.headers)
+        # Everything else is machine-to-machine and needs a key. A valid key
+        # is its own bucket (producers behind one NAT or ingress do not share);
+        # a missing or wrong key is counted per client address, so guessing
+        # keys cannot mint a fresh bucket per request.
+        try:
+            principal = auth.require_api_key(conn, self.headers)
+        except AuthFailed:
+            self._limit("api", self.address_string(), path)
+            raise
+        self._limit("api", "key:" + principal["id"], path)
         scope = principal["scope"]
 
         if m_orig and method == "GET":
@@ -1262,6 +1302,13 @@ class BlurdServer(BoundedThreadingHTTPServer):
         self.blurd_log = log or (lambda m: None)
         self.blurd_feedback_hits = {}   # per-IP rate window for /v1/feedback
         self.blurd_rate = _RateLimiter(cfg)
+        # A typo here must stop the start, not silently trust nobody (every
+        # client = the ingress) or be read wrong later on a request path.
+        try:
+            clientip.parse_trusted(str(cfg.get("trusted_proxies") or ""))
+        except ValueError as e:
+            raise ValidationError(f"trusted_proxies: {e}",
+                                  {"got": cfg.get("trusted_proxies")})
         # Blocked-request events flush to the audit log on each hit; the sweep
         # covers a burst that goes quiet before another request arrives.
         self.blurd_queue.on_sweep = self.blurd_rate.flush

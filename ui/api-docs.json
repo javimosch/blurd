@@ -320,6 +320,11 @@
           "schema": "Error"
         },
         {
+          "status": "429",
+          "description": "rate_limited: over rate.api_per_min for this API key on this pod (details.per = api_key; keyless calls count per client address). Honour retry_after",
+          "schema": "Error"
+        },
+        {
           "status": "507",
           "description": "storage_full: the storage cap (storage.max_bytes) or the disk guard refuses new work. With rotation on (storage.evict=oldest) the cap evicts the oldest images instead, so 507 then means the disk guard or a bucket that is full even after eviction",
           "schema": "Error"
@@ -1665,7 +1670,7 @@
       "responses": [
         {
           "status": "200",
-          "description": "settings, locked, ttl_seconds"
+          "description": "settings, locked, ttl_seconds, trusted_proxies"
         }
       ]
     },
@@ -1674,7 +1679,7 @@
       "method": "POST",
       "group": "dashboard \u2014 session-authed, not for integrations",
       "summary": "Change instance defaults (only the paths sent; null = back to default)",
-      "description": "Paths: profile.redact.mode, profile.redact.modes, allowed_redact_modes, profile.detect.{face,plate}.min_score, profile.detect.plate.min_aspect, profile.detect.plate.max_area, profile.output.optimize, profile.output.quality, profile.storage.ttl, fetch.max_bytes, storage.max_bytes, storage.evict (off|oldest), storage.evict_high_pct, storage.evict_low_pct, storage.orphan_check_hours. Validated per path; an env-locked path is refused. Audited; every replica applies it within ttl_seconds.",
+      "description": "Paths: profile.redact.mode, profile.redact.modes, allowed_redact_modes, profile.detect.{face,plate}.min_score, profile.detect.plate.min_aspect, profile.detect.plate.max_area, profile.output.optimize, profile.output.quality, profile.storage.ttl, fetch.max_bytes, storage.max_bytes, storage.evict (off|oldest), storage.evict_high_pct, storage.evict_low_pct, storage.orphan_check_hours, rate.api_per_min, rate.public_per_min (per pod, 0 = off). GET also returns trusted_proxies (read-only; BLURD_TRUSTED_PROXIES). Validated per path; an env-locked path is refused. Audited; every replica applies it within ttl_seconds.",
       "auth": "none",
       "params": [
         {

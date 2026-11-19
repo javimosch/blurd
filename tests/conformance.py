@@ -535,6 +535,52 @@ def main():
         s, b, _ = http_raw(f"{a.url}/ui-api/storage/orphans", method="POST",
                            headers=authed, body=b'{"classes":["nope"],"confirm":true}')
         check("deleting an unknown orphan class is refused", s == 422, f"got {s}")
+        print("\n-- rate limits: per API key, per client address, configurable")
+        def set_rt(changes):
+            s_, b_, _ = http_raw(f"{a.url}/ui-api/settings/runtime", method="POST",
+                                 headers=authed, body=json.dumps(changes).encode())
+            time.sleep(3.5)          # runtime settings reach every handler within 3 s
+            return s_, json.loads(b_ or b"{}").get("data") or {}
+        s, rt = set_rt({"rate.api_per_min": 20})
+        check("the API rate limit is a runtime setting", s == 200
+              and rt["settings"]["rate.api_per_min"]["value"] == 20, f"got {s}")
+        trusted = "127.0.0.1" in (rt.get("trusted_proxies") or "")
+        time.sleep(61 - (time.time() % 60))     # a fresh window for every bucket
+        codes = [http(f"{a.url}/v1/stats", key=a.api_key)[0] for _ in range(21)]
+        s, b, _ = http(f"{a.url}/v1/stats", key=a.api_key)
+        err = json.loads(b or b"{}").get("error", {})
+        check("an API key over its limit gets 429 counted per api_key",
+              codes[:20] == [200] * 20 and s == 429
+              and err.get("details", {}).get("per") == "api_key",
+              f"{codes[-3:]} then {s} {err.get('details')}")
+        other = a.scoped_key_a or a.api_key
+        if a.scoped_key_a:
+            s, _, _ = http(f"{a.url}/v1/stats", key=other)
+            check("another API key from the same address has its own bucket",
+                  s == 200, f"got {s}")
+        bad = []
+        for _ in range(21):
+            s, _, _ = http_raw(f"{a.url}/v1/stats", headers={
+                "Authorization": "Bearer nope", "X-Forwarded-For": "203.0.113.1"})
+            bad.append(s)
+        check("requests without a valid key are limited per client address",
+              bad[:20] == [401] * 20 and bad[20] == 429, f"{sorted(set(bad))}")
+        s, _, _ = http_raw(f"{a.url}/v1/stats", headers={
+            "Authorization": "Bearer nope", "X-Forwarded-For": "203.0.113.2"})
+        if trusted:
+            check("behind a trusted proxy, X-Forwarded-For selects the bucket",
+                  s == 401, f"got {s}")
+        else:
+            check("X-Forwarded-For from an untrusted peer is ignored (no bucket hopping)",
+                  s == 429, f"got {s}")
+        s, b, _ = http_raw(f"{a.url}/ui-api/stats", headers={"Authorization": basic})
+        check("the dashboard is not locked out by keyless traffic from its address",
+              s == 200, f"got {s}")
+        s, _ = set_rt({"rate.api_per_min": 0})
+        codes = [http(f"{a.url}/v1/stats", key=a.api_key)[0] for _ in range(5)]
+        check("rate.api_per_min = 0 turns the limit off", set(codes) == {200}, str(codes))
+        set_rt({"rate.api_per_min": None})
+
         s, b, _ = http_raw(f"{a.url}/ui-api/stats", headers={"Authorization": basic})
         st_o = (json.loads(b or b"{}").get("data") or {}).get("orphans") or {}
         check("dashboard stats carry the orphan summary for the header badge",

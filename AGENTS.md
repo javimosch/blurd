@@ -286,8 +286,16 @@ never leaves that process.
     evaluated at read time against the image's labels so deletion revokes
     immediately — and a rule can pin which tenant's labels qualify, because
     tags are caller-controlled. Non-matching and missing both answer 404.
-47. **Rate limiting is per-IP fixed-window, in `src/server.py`.** Public paths
-    get 60/min, everything else 300/min; `/_health` and `/_shutdown` are exempt
+47. **Rate limiting is fixed-window per pod, in `src/server.py`.** `/pub` gets
+    60/min per client address; authenticated `/v1` 300/min per API KEY (not per
+    address: behind an ingress or NAT every producer shares one); keyless
+    `/v1` and the dashboard per address, in separate buckets so keyless
+    guessing cannot lock the operator out. `rate.*` are runtime settings (0 =
+    off). The client address comes from `src/clientip.py`, which believes
+    `X-Forwarded-For` ONLY from `trusted_proxies` and reads it right to left --
+    trusting the header from anyone, or taking its leftmost entry, lets a
+    caller pick its own address and bucket. `/_shutdown` keeps the TCP peer.
+    `/_health` and `/_shutdown` are exempt
     so an orchestrator cannot lock itself out. Blocked hits flush to `audit`
     as ONE row per (class, ip, window) — grouped, not per-request. Audit rows
     (including these events) are pruned past 30 days in the reaper sweep.

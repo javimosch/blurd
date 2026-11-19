@@ -261,6 +261,16 @@ dashboard:
   existingSecret: ""
   existingSecretKey: dashboardPassword
 
+# Proxies whose X-Forwarded-For blurd believes: the ingress controller's pod
+# network (and any LB in front of it), as IPs/CIDRs. Without this every
+# producer behind the ingress looks like the ingress: one shared rate-limit
+# bucket for keyless traffic and the ingress address in the audit trail.
+# Never list 0.0.0.0/0 -- any client could then choose its own address.
+# Rate limits themselves (per pod, per API key) live in the dashboard or in
+# extraEnv: BLURD_RATE_API_PER_MIN / BLURD_RATE_PUBLIC_PER_MIN (0 = off).
+trustedProxies: []
+#  - 10.244.0.0/16        # e.g. the pod CIDR the ingress-nginx pods run in
+
 # Extra environment for anything the chart does not model. Every BLURD_* key in
 # src/config.py ENV_OVERRIDES works here.
 extraEnv: []

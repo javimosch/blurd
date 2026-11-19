@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: blurd
-  version: "0.23.4"
+  version: "0.23.5"
   description: >
     Machine-to-machine image redaction. Submit an image by URL or as raw bytes;
     blurd detects faces and licence plates, redacts them, stores only the
@@ -293,6 +293,7 @@ paths:
         "401": { description: "Missing or invalid API key", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "422": { description: "validation_error: bad image, non-public URL, too large, a disallowed redact mode, or an image above this key's scope max_input_bytes (the message names the limit; details carry bytes, max_input_bytes, tenant)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "503": { description: "overloaded (code 108): the queue's byte budget is full, or the instance is draining; honour retry_after and retry (never 502)", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "429": { description: "rate_limited: over rate.api_per_min for this API key on this pod (details.per = api_key; keyless calls count per client address). Honour retry_after", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         "507": { description: "storage_full: the storage cap (storage.max_bytes) or the disk guard refuses new work. With rotation on (storage.evict=oldest) the cap evicts the oldest images instead, so 507 then means the disk guard or a bucket that is full even after eviction", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     get:
       summary: List stored artifacts
@@ -644,7 +645,7 @@ paths:
         locked[] (paths an env var sets: read-only here), ttl_seconds (how
         long a replica may serve a stale value). Layering:
         defaults < config.json < these (shared database) < env.
-      responses: { "200": { description: "settings, locked, ttl_seconds" } }
+      responses: { "200": { description: "settings, locked, ttl_seconds, trusted_proxies" } }
     post:
       security: []
       summary: Change instance defaults (only the paths sent; null = back to default)
@@ -654,7 +655,9 @@ paths:
         profile.detect.plate.max_area, profile.output.optimize,
         profile.output.quality, profile.storage.ttl, fetch.max_bytes,
         storage.max_bytes, storage.evict (off|oldest), storage.evict_high_pct,
-        storage.evict_low_pct, storage.orphan_check_hours. Validated per path;
+        storage.evict_low_pct, storage.orphan_check_hours, rate.api_per_min,
+        rate.public_per_min (per pod, 0 = off). GET also returns
+        trusted_proxies (read-only; BLURD_TRUSTED_PROXIES). Validated per path;
         an env-locked path is refused. Audited; every replica applies it within
         ttl_seconds.
       parameters:

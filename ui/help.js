@@ -60,6 +60,9 @@ const HELP = {
   "r-ev": "oldest: past the high mark, delete the oldest images' bytes down to the low mark (images with open feedback last; records stay, reads answer 410 evicted). off: refuse new work at the cap.",
   "r-hi": "Rotation starts when usage passes this share of the cap.",
   "r-lo": "Rotation stops when usage is back under this share of the cap. Must be below the high mark; the gap is how much is freed per pass.",
+  "r-ra": "Requests per minute for /v1 and the dashboard, PER POD (N replicas let a client reach about N times this). Authenticated calls count per API key; calls without a valid key count per client address. 0 = no limit. Over it: 429 with retry_after.",
+  "r-rp": "Requests per minute per client address on the keyless /pub endpoints, per pod. 0 = no limit.",
+  "r-tp": "Proxies (ingress, Traefik) whose X-Forwarded-For header blurd believes, so limits and the audit trail see the real client instead of the proxy. Empty = the header is ignored. Set with BLURD_TRUSTED_PROXIES at deploy time.",
   // settings: orphans
   "class:o-cls": "Tick to include this class in the deletion. Only objects no record points at are listed; nothing an image, code or link uses is touched.",
   // settings: original retention

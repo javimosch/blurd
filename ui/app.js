@@ -1202,6 +1202,12 @@ async function loadRuntimeSettings() {
           </select>${src("storage.evict")}</div>
         <div><label>high mark (%)</label>${inp("r-hi", "storage.evict_high_pct", val("storage.evict_high_pct"))}</div>
         <div><label>low mark (%)</label>${inp("r-lo", "storage.evict_low_pct", val("storage.evict_low_pct"))}</div>
+      </div>
+      <div class="mintbox">
+        <div><label>rate limit, API (req/min)</label>${inp("r-ra", "rate.api_per_min", val("rate.api_per_min") ?? "", 'placeholder="off"')}${src("rate.api_per_min")}</div>
+        <div><label>rate limit, public (req/min)</label>${inp("r-rp", "rate.public_per_min", val("rate.public_per_min") ?? "", 'placeholder="off"')}${src("rate.public_per_min")}</div>
+        <div><label>trusted proxies</label><input id="r-tp" value="${esc(d.trusted_proxies || "")}" placeholder="none: X-Forwarded-For ignored" disabled>
+          <small style="color:var(--dim)">BLURD_TRUSTED_PROXIES (deploy time)</small></div>
         <button id="r-save">Save</button>
       </div>
       <div id="r-msg"></div>`;
@@ -1230,6 +1236,9 @@ async function loadRuntimeSettings() {
         "storage.evict": $("r-ev").value,
         "storage.evict_high_pct": int(v("r-hi")),
         "storage.evict_low_pct": int(v("r-lo")),
+        // 0 is a real value here (limit off), unlike the other fields
+        "rate.api_per_min": v("r-ra") === "" ? null : parseInt(v("r-ra"), 10),
+        "rate.public_per_min": v("r-rp") === "" ? null : parseInt(v("r-rp"), 10),
       };
       for (const k of Object.keys(body)) if (lk.has(k)) delete body[k];
       return body;

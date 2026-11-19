@@ -42,6 +42,9 @@ data:
   BLURD_ORT_ARENA: {{ ternary "1" "0" .Values.ortArena | quote }}
   BLURD_MALLOC_TRIM: {{ ternary "1" "0" .Values.mallocTrim | quote }}
   BLURD_DRAIN_SECONDS: {{ .Values.drainSeconds | quote }}
+  {{- with .Values.trustedProxies }}
+  BLURD_TRUSTED_PROXIES: {{ join "," . | quote }}
+  {{- end }}
   # glibc returns freed pages to the OS more readily with a bounded arena
   # count; blurd also calls malloc_trim() between jobs.
   MALLOC_ARENA_MAX: "2"

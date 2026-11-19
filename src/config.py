@@ -116,6 +116,16 @@ DEFAULTS = {
         # for the dashboard badge. Deletion always needs a human. 0 = off.
         "orphan_check_hours": 24,
     },
+    # Fixed-window rate limits, requests per minute PER POD (each replica
+    # counts on its own: N replicas let a client reach ~N x the limit).
+    # Authenticated /v1 calls are counted per API KEY; /pub, the dashboard and
+    # requests without a valid key per client IP. 0 = that limit is off.
+    "rate": {"api_per_min": 300, "public_per_min": 60},
+    # Proxies allowed to tell blurd the client's address via X-Forwarded-For:
+    # comma-separated IPs/CIDRs (the ingress controller, Traefik...). Empty =
+    # the header is ignored and the TCP peer is the client, because otherwise
+    # any caller could choose its own address and its own rate-limit bucket.
+    "trusted_proxies": "",
     # Seconds to let in-flight jobs finish after SIGTERM. Should sit inside
     # the orchestrator's grace period (k8s terminationGracePeriodSeconds).
     "drain_seconds": 20,
@@ -366,6 +376,9 @@ ENV_OVERRIDES = {
     "BLURD_STORAGE_EVICT_HIGH_PCT": ("storage.evict_high_pct", int),
     "BLURD_STORAGE_EVICT_LOW_PCT": ("storage.evict_low_pct", int),
     "BLURD_STORAGE_ORPHAN_CHECK_HOURS": ("storage.orphan_check_hours", int),
+    "BLURD_RATE_API_PER_MIN": ("rate.api_per_min", int),
+    "BLURD_RATE_PUBLIC_PER_MIN": ("rate.public_per_min", int),
+    "BLURD_TRUSTED_PROXIES": ("trusted_proxies", str),
     "BLURD_HTTP_THREADS": ("http_threads", str),   # int, or "auto"
     "BLURD_ORT_THREADS": ("ort_threads", int),
     "BLURD_DASHBOARD_USER": ("dashboard_user", str),

@@ -111,6 +111,10 @@ RUNTIME: Dict[str, Callable[[Any], Any]] = {
     "storage.evict_high_pct": _int_range(10, 100),
     "storage.evict_low_pct": _int_range(5, 99),
     "storage.orphan_check_hours": _int_range(0, 24 * 30),
+    # rate limits per pod and minute (0 = off); trusted_proxies is NOT here:
+    # who may assert a client address is infrastructure, set at deploy time.
+    "rate.api_per_min": _int_range(0, 1_000_000),
+    "rate.public_per_min": _int_range(0, 1_000_000),
 }
 
 
@@ -240,4 +244,6 @@ def describe(cfg, conn) -> Dict[str, Any]:
         out[path] = {"value": cfg.get(path), "default": default,
                      "source": ("env" if path in locked else
                                 "dashboard" if path in stored else "default/file")}
-    return {"settings": out, "locked": locked, "ttl_seconds": RUNTIME_TTL}
+    return {"settings": out, "locked": locked, "ttl_seconds": RUNTIME_TTL,
+            # read-only context for the rate-limit fields (deploy-time setting)
+            "trusted_proxies": str(cfg.get("trusted_proxies") or "")}

@@ -211,6 +211,20 @@ sizes itself from the *node*, then gets OOM-killed against a limit it never saw.
 > shape passes conformance under Docker. It has **not** been applied to a live
 > cluster, so scheduling, CSI, ingress and HPA behaviour are unverified in situ.
 
+### Rate limits behind the ingress
+
+Set `trustedProxies` (Helm) / `BLURD_TRUSTED_PROXIES` to the ingress
+controller's pod CIDR, plus any load balancer in front of it. Then blurd sees
+each caller's real address in the access log and the audit trail, and counts
+keyless traffic per caller. Authenticated `/v1` calls are counted per API key
+either way, so producers behind one NAT or one ingress never share a bucket.
+
+Limits are counted **per pod**. With N replicas behind the ingress, a key can
+reach about N × `BLURD_RATE_API_PER_MIN`. That is deliberate: a cluster-wide
+counter would cost a database write per request. Size the limit per pod. If you
+need a hard cluster-wide cap, put it at the edge (ingress-nginx `limit-rpm`
+annotations).
+
 ### Key management on Kubernetes
 
 Key commands are local-only (`keys add/list/revoke/export/import` — there is
@@ -361,6 +375,8 @@ environment variable:
 | `BLURD_ORIGINALS_ENABLED` / `_MAX_TTL` / `_URL_MODE` / `_SIGN_TTL` | opt-in source retention (default off, 30 d cap, `authenticated`, 900 s); set = locked in the dashboard. See `spec/originals.md` |
 | `BLURD_ORIGINALS_SIGN_SECRET` | HMAC secret for `signed` url mode; auto-generated and shared via the database if unset |
 | `BLURD_DRAIN_SECONDS` | must be under the container's grace period |
+| `BLURD_TRUSTED_PROXIES` | comma-separated IPs/CIDRs of the proxies in front of blurd (ingress controller, Traefik, nginx). Only a request whose TCP peer is in this list may name the client in `X-Forwarded-For`, read right to left. Empty (default) = the header is ignored. Needed behind any proxy, or every caller looks like the proxy. Never `0.0.0.0/0` |
+| `BLURD_RATE_API_PER_MIN` / `BLURD_RATE_PUBLIC_PER_MIN` | fixed-window limits **per pod**, default 300 / 60, 0 = off. Authenticated `/v1` calls count per API key; keyless calls, `/pub` and the dashboard per client address (separate buckets). Over the limit: `429 rate_limited` with `retry_after`. Also editable in the dashboard |
 | `BLURD_DASHBOARD_USER` / `BLURD_DASHBOARD_PASSWORD` | the human dashboard only — never `/v1` |
 | `BLURD_DASHBOARD_ALLOW_KEY_CREATION` | default `true` (0.23): the dashboard creates, renames, revokes and removes keys and edits scope limits. `false` forbids minting. If `BLURD_DASHBOARD_KEY_SECRET` is set, each mint also needs it |
 | `BLURD_PULL_MODELS` | fetch detector models at start |
